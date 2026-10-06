@@ -217,14 +217,13 @@ Releases are automated by release-plz (`.github/workflows/release.yml`):
 merge to `main`, then merge the `release-pr` bot's version-bump PR —
 publishing to crates.io and the GitHub Release happen automatically.
 
-Registry auth, pick one:
-
-- **API token (classic):** create a crates.io token, add it as the repo
-  secret `CARGO_REGISTRY_TOKEN` (Settings → Secrets → Actions).
-- **Trusted Publishing (OIDC, no long-lived secret):** on crates.io add
-  `mimi1vx/stdio2http` as a trusted publisher for the `stdio2http` crate,
-  then drop `CARGO_REGISTRY_TOKEN` and give the `release` job
-  `id-token: write`.
+Registry auth is OIDC Trusted Publishing — no long-lived secrets.
+Once the crate exists, it lists this repo + workflow as a trusted
+publisher (`crates.io/crates/stdio2http/settings`); the `release` job
+mints a short-lived token via `rust-lang/crates.io-auth-action`.
+crates.io has no "pending publisher" for new crates, so the `0.1.0`
+bootstrap is one manual `cargo publish` (after `cargo login`) plus
+adding the trusted publisher; everything after that is OIDC.
 
 ## License
 

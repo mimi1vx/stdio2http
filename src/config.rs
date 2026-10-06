@@ -182,7 +182,8 @@ pub struct Config {
     #[arg(
         long = "tls-cert-pem",
         env = "STDIO2HTTP_TLS_CERT_PEM",
-        value_name = "PEM"
+        value_name = "PEM",
+        allow_hyphen_values = true
     )]
     pub tls_cert_pem: Option<String>,
 
@@ -190,7 +191,8 @@ pub struct Config {
     #[arg(
         long = "tls-key-pem",
         env = "STDIO2HTTP_TLS_KEY_PEM",
-        value_name = "PEM"
+        value_name = "PEM",
+        allow_hyphen_values = true
     )]
     pub tls_key_pem: Option<String>,
 
@@ -206,7 +208,8 @@ pub struct Config {
     #[arg(
         long = "tls-client-ca-pem",
         env = "STDIO2HTTP_TLS_CLIENT_CA_PEM",
-        value_name = "PEM"
+        value_name = "PEM",
+        allow_hyphen_values = true
     )]
     pub tls_client_ca_pem: Option<String>,
 
@@ -665,6 +668,27 @@ mod tests {
         .expect("parse");
         cfg.validate().expect("paired inline PEM is valid");
         assert!(cfg.tls_enabled());
+    }
+
+    #[test]
+    fn tls_inline_pem_accepts_leading_dashes() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert-pem",
+            "-----BEGIN CERTIFICATE-----",
+            "--tls-key-pem",
+            "-----BEGIN PRIVATE KEY-----",
+        ])
+        .expect("PEM starting with dashes parses as a value");
+        assert_eq!(
+            cfg.tls_cert_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----")
+        );
+        assert_eq!(
+            cfg.tls_key_pem.as_deref(),
+            Some("-----BEGIN PRIVATE KEY-----")
+        );
     }
 
     #[test]

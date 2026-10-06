@@ -42,7 +42,7 @@ jobs:
       # CARGO_REGISTRY_TOKEN secret: the crate's trusted publisher
       # (crates.io/crates/stdio2http/settings) must list this repo
       # + workflow file.
-      - uses: rust-lang/crates.io-auth-action@v1
+      - uses: rust-lang/crates-io-auth-action@v1.0.5
         id: auth
       - uses: MarcoIeni/release-plz-action@v0.5
         with:

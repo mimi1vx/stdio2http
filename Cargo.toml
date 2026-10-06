@@ -1,0 +1,58 @@
+[package]
+name = "stdio2http"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "MCP stdio -> Streamable HTTP proxy"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+http = "1"
+rmcp = {
+  version = "=3.5.1",
+  default-features = false,
+  features = [
+    "client",
+    "server",
+    "transport-child-process",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+  ]
+}
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.6"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Test-only: the HTTP client transport drives the proxy the way a real MCP client would.
+rmcp = {
+  version = "=3.5.1",
+  default-features = false,
+  features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+  ]
+}
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

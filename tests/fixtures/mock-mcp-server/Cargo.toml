@@ -1,0 +1,43 @@
+[package]
+name = "mock-mcp-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Deterministic stdio MCP server fixture for stdio2http integration tests"
+license = "MIT"
+publish = false
+
+# Standalone crate: the parent stdio2http package has no `[workspace]`, so this
+# empty table is what keeps `cargo build --manifest-path ...` from trying to
+# resolve a parent workspace it cannot find.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+rmcp = {
+  version = "=3.5.1",
+  default-features = false,
+  features = [
+    "macros",
+    "server",
+    "transport-io",
+  ]
+}
+serde_json = "1"
+tokio = {
+  version = "1",
+  features = [
+    "io-std",
+    "macros",
+    "rt-multi-thread",
+    "time",
+  ]
+}
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-deps:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      gha-deps:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-deps:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"

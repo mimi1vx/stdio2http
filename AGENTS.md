@@ -34,6 +34,13 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 - `unsafe_code = "forbid"`, clippy `pedantic = warn`. Dockerfile is cached-deps multi-stage (`rust:1-slim-bookworm` → `debian:bookworm-slim`, `USER nobody`); the upstream interpreter (node/python/...) must be installed in the runtime image separately.
 - No CI in repo; no `opencode.json`. `br`/`bd` is the issue tracker (see below).
 
+## Dependency updates
+
+- `.github/dependabot.yml`: `cargo` + `github-actions` + `docker`, weekly, one grouped PR per ecosystem (`*`), `chore` prefix + `dependencies` label. No `ignore:` on `rmcp`.
+- Merge bar is green `ci.yml`: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, fixture pre-build + `cargo test --locked`, `audit-check`, docker build + `--help` smoke.
+- `rmcp` bumps additionally need `cargo tree -e features | grep streamable` showing `transport-streamable-http-server` + `-session` (never `local`) plus full `cargo test --locked` green.
+- `dtolnay/rust-toolchain@stable` tracks a branch, so expect few/no PRs for it by design.
+
 <!-- br-agent-instructions-v1 -->
 
 ---

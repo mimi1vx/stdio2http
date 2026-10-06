@@ -211,6 +211,21 @@ cargo clippy --all-targets -- -D warnings
 The end-to-end tests build and spawn a deterministic fixture MCP server from
 `tests/fixtures/mock-mcp-server/`, so `cargo test` needs no network access.
 
+### Release
+
+Releases are automated by release-plz (`.github/workflows/release.yml`):
+merge to `main`, then merge the `release-pr` bot's version-bump PR —
+publishing to crates.io and the GitHub Release happen automatically.
+
+Registry auth, pick one:
+
+- **API token (classic):** create a crates.io token, add it as the repo
+  secret `CARGO_REGISTRY_TOKEN` (Settings → Secrets → Actions).
+- **Trusted Publishing (OIDC, no long-lived secret):** on crates.io add
+  `mimi1vx/stdio2http` as a trusted publisher for the `stdio2http` crate,
+  then drop `CARGO_REGISTRY_TOKEN` and give the `release` job
+  `id-token: write`.
+
 ## License
 
 Dual-licensed under MIT OR Apache-2.0. © 2026 Ondřej Súkup.

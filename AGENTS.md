@@ -5,14 +5,15 @@ Single Rust binary: spawns one stdio MCP server as a child, re-exposes it over M
 ## Commands
 
 ```sh
-cargo test                              # unit + e2e (offline, spawns fixture)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check                       # rustfmt.toml: edition 2024, max_width 100
+cargo build --locked --manifest-path tests/fixtures/mock-mcp-server/Cargo.toml  # e2e fixture first: tests locate it via cargo metadata but never build it
+cargo test --locked                     # unit + e2e (offline, spawns fixture)
+cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --all -- --check              # rustfmt.toml: edition 2024, max_width 100
 curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 ```
 
 - Full e2e binary: `./target/release/stdio2http --command <program> [--arg ...]`
-- If a test fails with `fixture not built at ...`, run `cargo build --manifest-path tests/fixtures/mock-mcp-server/Cargo.toml` first.
+- CI (`.github/workflows/ci.yml`): fmt + clippy + test (with fixture pre-build) + `audit-check` + docker build / `--help` smoke. Docker `healthz` check is help-only: the runtime stage ships no interpreter for a live upstream child.
 
 ## Architecture
 
@@ -29,17 +30,18 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 - `rmcp = "=3.5.1"` pinned in both crates. Server needs `transport-streamable-http-server` + `transport-streamable-http-server-session`; do not enable the non-default `local` feature. After touching features, verify with `cargo tree -e features | grep streamable`.
 - `allowed_hosts` defaults to loopback only (DNS-rebinding guard). Off-host deployments must pass `--allowed-host`; `--disable-allowed-hosts` only behind a validating proxy.
 - `--api-key KEY` (bare) forwards the secret itself as `_meta["io.stdio2http/caller"]`; prefer `KEY=SUBJECT`. `identity-forward` is advisory `_meta`, not process isolation; shared upstream state is shared across all callers.
-- No TLS in the proxy — plain HTTP behind a terminating proxy or on a trusted network.
+- TLS is opt-in per listener (`src/tls.rs`, `src/acme.rs`): no TLS flags → plain HTTP; any cert/ACME/client-CA input → same `host:port` speaks HTTPS only, no redirect. ACME needs `cargo build --features acme`. mTLS verifies at the handshake so `/healthz` needs a client cert too.
 - Notifications and server→client requests do not forward (`progress`, `list_changed`, `logging/message`, `sampling`, `elicitation`, `roots`). A tool needing them fails — that is a design limit, not a bug to patch around.
 - `unsafe_code = "forbid"`, clippy `pedantic = warn`. Dockerfile is cached-deps multi-stage (`rust:1-slim-bookworm` → `debian:bookworm-slim`, `USER nobody`); the upstream interpreter (node/python/...) must be installed in the runtime image separately.
-- No CI in repo; no `opencode.json`. `br`/`bd` is the issue tracker (see below).
+- No `opencode.json`. `br`/`bd` is the issue tracker (see below).
 
 ## Dependency updates
 
 - `.github/dependabot.yml`: `cargo` + `github-actions` + `docker`, weekly, one grouped PR per ecosystem (`*`), `chore` prefix + `dependencies` label. No `ignore:` on `rmcp`.
-- Merge bar is green `ci.yml`: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, fixture pre-build + `cargo test --locked`, `audit-check`, docker build + `--help` smoke.
+- Merge bar is green `ci.yml`: `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings`, fixture pre-build + `cargo test --locked`, `audit-check`, docker build + `--help` smoke.
 - `rmcp` bumps additionally need `cargo tree -e features | grep streamable` showing `transport-streamable-http-server` + `-session` (never `local`) plus full `cargo test --locked` green.
 - `dtolnay/rust-toolchain@stable` tracks a branch, so expect few/no PRs for it by design.
+- Release is release-plz (`release.yml`): merge to `main`, then merge the bot's `release-pr` version-bump PR — never hand-edit versions/`CHANGELOG.md` or `cargo publish` (OIDC trusted publishing, no token).
 
 <!-- br-agent-instructions-v1 -->
 

@@ -335,12 +335,12 @@ fn exchange(
             {
                 break;
             }
-        } else if let Some(length) = content_length {
-            if body.len() >= length {
-                body.truncate(length);
-                scan_lines(&body, &mut scanned, &mut events);
-                break;
-            }
+        } else if let Some(length) = content_length
+            && body.len() >= length
+        {
+            body.truncate(length);
+            scan_lines(&body, &mut scanned, &mut events);
+            break;
         }
         if Instant::now() > deadline {
             if want_id.is_some() {
@@ -451,10 +451,11 @@ impl Proxy {
             })
             .await
             .expect("client thread runs");
-            if let Ok(response) = &attempt {
-                if response.status == 200 && response.body == b"ok" {
-                    return Ok(());
-                }
+            if let Ok(response) = &attempt
+                && response.status == 200
+                && response.body == b"ok"
+            {
+                return Ok(());
             }
             if let Some(status) = self.try_exit() {
                 return Err(format!(

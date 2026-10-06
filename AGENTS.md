@@ -1,3 +1,39 @@
+# stdio2http
+
+Single Rust binary: spawns one stdio MCP server as a child, re-exposes it over MCP Streamable HTTP. No workspace — root crate + standalone fixture crate.
+
+## Commands
+
+```sh
+cargo test                              # unit + e2e (offline, spawns fixture)
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check                       # rustfmt.toml: edition 2024, max_width 100
+curl -fsS localhost:8080/healthz       # smoke test (-> ok)
+```
+
+- Full e2e binary: `./target/release/stdio2http --command <program> [--arg ...]`
+- If a test fails with `fixture not built at ...`, run `cargo build --manifest-path tests/fixtures/mock-mcp-server/Cargo.toml` first.
+
+## Architecture
+
+- `src/main.rs` — parse `Config`, spawn `Upstream`, serve, shut down child on exit.
+- `src/config.rs` — clap + `STDIO2HTTP_*` env, no config file. Flags win over env.
+- `src/upstream.rs` — `TokioChildProcess` + `.serve()` → `Arc<Peer<RoleClient>>`. One long-lived child, `peer_info` snapshotted once. A dead child is fatal (non-zero exit, no restart).
+- `src/proxy.rs` — `ServerHandler` forwarding every method to the shared peer. Map failures to opaque `internal_error`; never leak child stderr or process env to the client.
+- `src/http.rs` — axum router: `/healthz` (`ok`) + `/mcp` via `StreamableHttpService` with `LocalSessionManager`. rmcp owns sessions/SSE/`Mcp-Session-Id`/negotiation — do not reimplement. `SIGTERM`/`SIGINT` shut down in ~1s and reap the child.
+- `src/auth.rs` — tower layer on `/mcp` only; `/healthz` and CORS preflight stay open. Modes `none`/`bearer`/`identity-forward`. Keys via `Authorization: Bearer` or `X-API-Key`, constant-time compare (`subtle`), never logged. Missing and wrong keys give identical `401` + `WWW-Authenticate: Bearer realm="mcp"`.
+- `tests/proxy.rs` + `tests/fixtures/mock-mcp-server/` (`echo`, `whoami` tools) — e2e uses port `0`, real rmcp Streamable HTTP client.
+
+## Gotchas
+
+- `rmcp = "=3.5.1"` pinned in both crates. Server needs `transport-streamable-http-server` + `transport-streamable-http-server-session`; do not enable the non-default `local` feature. After touching features, verify with `cargo tree -e features | grep streamable`.
+- `allowed_hosts` defaults to loopback only (DNS-rebinding guard). Off-host deployments must pass `--allowed-host`; `--disable-allowed-hosts` only behind a validating proxy.
+- `--api-key KEY` (bare) forwards the secret itself as `_meta["io.stdio2http/caller"]`; prefer `KEY=SUBJECT`. `identity-forward` is advisory `_meta`, not process isolation; shared upstream state is shared across all callers.
+- No TLS in the proxy — plain HTTP behind a terminating proxy or on a trusted network.
+- Notifications and server→client requests do not forward (`progress`, `list_changed`, `logging/message`, `sampling`, `elicitation`, `roots`). A tool needing them fails — that is a design limit, not a bug to patch around.
+- `unsafe_code = "forbid"`, clippy `pedantic = warn`. Dockerfile is cached-deps multi-stage (`rust:1-slim-bookworm` → `debian:bookworm-slim`, `USER nobody`); the upstream interpreter (node/python/...) must be installed in the runtime image separately.
+- No CI in repo; no `opencode.json`. `br`/`bd` is the issue tracker (see below).
+
 <!-- br-agent-instructions-v1 -->
 
 ---

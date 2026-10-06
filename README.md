@@ -8,7 +8,7 @@ it with [`rmcp`](https://crates.io/crates/rmcp). Session ids, `Mcp-Session-Id`,
 SSE framing, `Last-Event-ID`, content negotiation, and protocol negotiation are
 all handled by rmcp — none of that is reimplemented here.
 
-```
+```text
                     ┌──────────────────────────────┐
  HTTP client  ──────▶│ /mcp  StreamableHttpService  │
                     │      (rmcp owns sessions)     │
@@ -105,7 +105,7 @@ validates the header.
 ## Authentication
 
 `--auth-mode` selects one of three modes. The layer covers `/mcp` only:
-`/healthz` and CORS preflight (`OPTIONS`) stay open. Keys are compared in
+`/healthz` stays open. Keys are compared in
 constant time, and no configured or presented key is ever logged.
 
 ### `none`
@@ -174,8 +174,9 @@ handles these explicitly is a different design.
 
 ## Operational behavior
 
-- **A dead child is fatal.** `stdio2http` exits non-zero; it does not restart the
-  child. Let your orchestrator handle it.
+- **A child that fails to start is fatal.** `stdio2http` exits non-zero; it does not restart the
+  child. If the child dies later, calls fail with an opaque `internal_error`
+  and the proxy still does not restart it. Let your orchestrator handle it.
 - **`SIGTERM`/`SIGINT` shut down gracefully**, within about a second, and reap
   the child. Container stop signals work as expected.
 - **Startup logs** the child pid, upstream name and version, negotiated protocol

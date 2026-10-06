@@ -1,5 +1,10 @@
 # stdio2http
 
+[![crates.io](https://img.shields.io/crates/v/stdio2http.svg)](https://crates.io/crates/stdio2http)
+[![docs.rs](https://docs.rs/stdio2http/badge.svg)](https://docs.rs/stdio2http)
+[![CI](https://github.com/mimi1vx/stdio2http/actions/workflows/ci.yml/badge.svg)](https://github.com/mimi1vx/stdio2http/actions)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
 Re-exposes a **stdio-only MCP server** over **MCP Streamable HTTP**, so HTTP
 clients on a container network can use a server that ships no HTTP transport.
 
@@ -26,6 +31,18 @@ all handled by rmcp — none of that is reimplemented here.
 
 One child serves every HTTP session: the service factory clones the `Arc<Peer>`,
 so all sessions multiplex over the same process by JSON-RPC request id.
+
+## Installation
+
+```sh
+cargo install stdio2http
+```
+
+For a reproducible build pinned to the lockfile:
+
+```sh
+cargo install --locked stdio2http
+```
 
 ## Build and run
 
@@ -193,3 +210,7 @@ cargo clippy --all-targets -- -D warnings
 
 The end-to-end tests build and spawn a deterministic fixture MCP server from
 `tests/fixtures/mock-mcp-server/`, so `cargo test` needs no network access.
+
+## License
+
+Dual-licensed under MIT OR Apache-2.0. © 2026 Ondřej Súkup.

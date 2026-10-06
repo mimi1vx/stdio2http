@@ -1,0 +1,9 @@
+[workspace]
+# Single binary crate: tag vX.Y.Z, open a GitHub release per tag,
+# publish to crates.io.
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_type = "prod"
+
+[changelog]
+trim = true

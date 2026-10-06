@@ -4,8 +4,14 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "MCP stdio -> Streamable HTTP proxy"
-license = "MIT"
-publish = false
+documentation = "https://docs.rs/stdio2http"
+readme = "README.md"
+homepage = "https://github.com/mimi1vx/stdio2http"
+repository = "https://github.com/mimi1vx/stdio2http"
+license = "MIT OR Apache-2.0"
+keywords = ["http", "mcp", "proxy"]
+categories = ["network-programming"]
+exclude = [".beads/"]
 
 [dependencies]
 anyhow = "1"
@@ -35,7 +41,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Test-only: the HTTP client transport drives the proxy the way a real MCP client would.
 rmcp = {
   version = "=3.5.1",
@@ -45,6 +50,7 @@ rmcp = {
     "transport-streamable-http-client-reqwest",
   ]
 }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -1,5 +1,6 @@
 //! Configuration surface: CLI flags plus environment variables, no config file.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -59,7 +60,7 @@ fn parse_key_value(raw: &str) -> Result<(String, String), String> {
     }
 }
 
-#[derive(Debug, Clone, Parser)]
+#[derive(Clone, Parser)]
 #[command(
     name = "stdio2http",
     version,
@@ -164,6 +165,137 @@ pub struct Config {
         action = clap::ArgAction::SetTrue
     )]
     pub disable_allowed_hosts: bool,
+
+    /// Server certificate chain in PEM format, as a file path.
+    #[arg(
+        long = "tls-cert",
+        env = "STDIO2HTTP_TLS_CERT",
+        value_name = "CERT_FILE"
+    )]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Server private key in PEM format, as a file path.
+    #[arg(long = "tls-key", env = "STDIO2HTTP_TLS_KEY", value_name = "KEY_FILE")]
+    pub tls_key: Option<PathBuf>,
+
+    /// Server certificate chain in PEM format, inline for secret injection.
+    #[arg(
+        long = "tls-cert-pem",
+        env = "STDIO2HTTP_TLS_CERT_PEM",
+        value_name = "PEM",
+        allow_hyphen_values = true
+    )]
+    pub tls_cert_pem: Option<String>,
+
+    /// Server private key in PEM format, inline for secret injection.
+    #[arg(
+        long = "tls-key-pem",
+        env = "STDIO2HTTP_TLS_KEY_PEM",
+        value_name = "PEM",
+        allow_hyphen_values = true
+    )]
+    pub tls_key_pem: Option<String>,
+
+    /// Client CA bundle in PEM format, as a file path. Enables mTLS.
+    #[arg(
+        long = "tls-client-ca",
+        env = "STDIO2HTTP_TLS_CLIENT_CA",
+        value_name = "CA_FILE"
+    )]
+    pub tls_client_ca: Option<PathBuf>,
+
+    /// Client CA bundle in PEM format, inline for secret injection. Enables mTLS.
+    #[arg(
+        long = "tls-client-ca-pem",
+        env = "STDIO2HTTP_TLS_CLIENT_CA_PEM",
+        value_name = "PEM",
+        allow_hyphen_values = true
+    )]
+    pub tls_client_ca_pem: Option<String>,
+
+    /// Contact email for the ACME account.
+    #[arg(
+        long = "acme-email",
+        env = "STDIO2HTTP_ACME_EMAIL",
+        value_name = "EMAIL"
+    )]
+    pub acme_email: Option<String>,
+
+    /// Domain to issue a certificate for; repeatable or comma-separated.
+    #[arg(
+        long = "acme-domain",
+        env = "STDIO2HTTP_ACME_DOMAINS",
+        value_name = "DOMAIN",
+        value_delimiter = ','
+    )]
+    pub acme_domains: Vec<String>,
+
+    /// Directory holding the ACME account and certificate cache.
+    #[arg(
+        long = "acme-cache-dir",
+        env = "STDIO2HTTP_ACME_CACHE_DIR",
+        value_name = "DIR"
+    )]
+    pub acme_cache_dir: Option<PathBuf>,
+
+    /// ACME directory URL; defaults to Let's Encrypt production.
+    #[arg(
+        long = "acme-directory-url",
+        env = "STDIO2HTTP_ACME_DIRECTORY_URL",
+        value_name = "URL",
+        default_value = "https://acme-v02.api.letsencrypt.org/directory"
+    )]
+    pub acme_directory_url: String,
+
+    /// Port for the ACME HTTP-01 challenge listener.
+    #[arg(
+        long = "acme-http-port",
+        env = "STDIO2HTTP_ACME_HTTP_PORT",
+        default_value_t = 80
+    )]
+    pub acme_http_port: u16,
+}
+
+// Hand-written so PEM material and API keys can never reach a log via `{:?}`.
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("command_program", &self.command_program)
+            .field("command_args", &self.command_args)
+            .field("env", &self.env)
+            .field("cwd", &self.cwd)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("mcp_path", &self.mcp_path)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("auth_mode", &self.auth_mode)
+            .field("api_keys", &format!("{} key(s)", self.api_keys.len()))
+            .field("log_level", &self.log_level)
+            .field("init_timeout_ms", &self.init_timeout_ms)
+            .field("disable_allowed_hosts", &self.disable_allowed_hosts)
+            .field("tls_cert", &self.tls_cert)
+            .field("tls_key", &self.tls_key)
+            .field(
+                "tls_cert_pem",
+                &self.tls_cert_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "tls_key_pem",
+                &self.tls_key_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tls_client_ca", &self.tls_client_ca)
+            .field(
+                "tls_client_ca_pem",
+                &self.tls_client_ca_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field("acme_email", &self.acme_email)
+            .field("acme_domains", &self.acme_domains)
+            .field("acme_cache_dir", &self.acme_cache_dir)
+            .field("acme_directory_url", &self.acme_directory_url)
+            .field("acme_http_port", &self.acme_http_port)
+            .finish()
+    }
 }
 
 impl Config {
@@ -185,12 +317,43 @@ impl Config {
         std::net::SocketAddr::new(self.host, self.port)
     }
 
+    /// A manually configured server certificate is present (file or inline).
+    #[must_use]
+    pub fn has_manual_cert(&self) -> bool {
+        self.tls_cert.is_some() || self.tls_cert_pem.is_some()
+    }
+
+    /// A manually configured server key is present (file or inline).
+    #[must_use]
+    pub fn has_manual_key(&self) -> bool {
+        self.tls_key.is_some() || self.tls_key_pem.is_some()
+    }
+
+    /// ACME auto-issuance is requested. The directory URL and challenge port
+    /// carry defaults, so only an explicit email, domain, or cache dir counts.
+    #[must_use]
+    pub fn uses_acme(&self) -> bool {
+        self.acme_email.is_some() || !self.acme_domains.is_empty() || self.acme_cache_dir.is_some()
+    }
+
+    /// Client-certificate verification is requested.
+    #[must_use]
+    pub fn uses_mtls(&self) -> bool {
+        self.tls_client_ca.is_some() || self.tls_client_ca_pem.is_some()
+    }
+
+    /// The listener must speak TLS: a manual cert, ACME, or mTLS implies it.
+    #[must_use]
+    pub fn tls_enabled(&self) -> bool {
+        self.has_manual_cert() || self.has_manual_key() || self.uses_acme() || self.uses_mtls()
+    }
+
     /// Reject combinations that would silently run unauthenticated or misconfigured.
     ///
     /// # Errors
     ///
     /// Returns a message naming the offending flag when the command, the mount
-    /// path, or the authentication mode is unusable.
+    /// path, the authentication mode, or the TLS/ACME selection is unusable.
     pub fn validate(&self) -> Result<(), String> {
         if self.command_program.is_empty() {
             return Err("--command must name a program".to_string());
@@ -211,6 +374,30 @@ impl Config {
                     ));
                 }
             }
+        }
+        if self.tls_cert.is_some() && self.tls_cert_pem.is_some() {
+            return Err("--tls-cert and --tls-cert-pem are mutually exclusive".to_string());
+        }
+        if self.tls_key.is_some() && self.tls_key_pem.is_some() {
+            return Err("--tls-key and --tls-key-pem are mutually exclusive".to_string());
+        }
+        if self.tls_client_ca.is_some() && self.tls_client_ca_pem.is_some() {
+            return Err(
+                "--tls-client-ca and --tls-client-ca-pem are mutually exclusive".to_string(),
+            );
+        }
+        if self.has_manual_cert() != self.has_manual_key() {
+            return Err("--tls-cert and --tls-key must be provided together".to_string());
+        }
+        let has_manual = self.has_manual_cert() || self.has_manual_key();
+        if has_manual && self.uses_acme() {
+            return Err("--tls-cert/--tls-key cannot be combined with --acme-*".to_string());
+        }
+        if self.uses_mtls() && !has_manual && !self.uses_acme() {
+            return Err(
+                "--tls-client-ca* requires a server certificate (--tls-cert/--tls-key) or ACME (--acme-domain)"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -250,6 +437,23 @@ mod tests {
         );
         assert_eq!(cfg.allowed_origins, no_strings, "origin validation is off");
         assert!(!cfg.disable_allowed_hosts);
+        assert!(cfg.tls_cert.is_none());
+        assert!(cfg.tls_key.is_none());
+        assert!(cfg.tls_cert_pem.is_none());
+        assert!(cfg.tls_key_pem.is_none());
+        assert!(cfg.tls_client_ca.is_none());
+        assert!(cfg.tls_client_ca_pem.is_none());
+        assert!(cfg.acme_email.is_none());
+        assert_eq!(cfg.acme_domains, Vec::<String>::new());
+        assert!(cfg.acme_cache_dir.is_none());
+        assert_eq!(
+            cfg.acme_directory_url,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(cfg.acme_http_port, 80);
+        assert!(!cfg.tls_enabled());
+        assert!(!cfg.uses_acme());
+        assert!(!cfg.uses_mtls());
         cfg.validate().expect("defaults are valid");
     }
 
@@ -400,8 +604,262 @@ mod tests {
             "--log-level",
             "--init-timeout-ms",
             "--disable-allowed-hosts",
+            "--tls-cert",
+            "--tls-key",
+            "--tls-cert-pem",
+            "--tls-key-pem",
+            "--tls-client-ca",
+            "--tls-client-ca-pem",
+            "--acme-email",
+            "--acme-domain",
+            "--acme-cache-dir",
+            "--acme-directory-url",
+            "--acme-http-port",
         ] {
             assert!(help.contains(field), "help is missing {field}");
+        }
+    }
+
+    #[test]
+    fn tls_cert_without_key_is_rejected() {
+        let cfg = parse(&["--command", "s", "--tls-cert", "/certs/cert.pem"]).expect("parse");
+        let err = cfg.validate().expect_err("unpaired cert");
+        assert!(
+            err.contains("--tls-cert") && err.contains("--tls-key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tls_key_without_cert_is_rejected() {
+        let cfg = parse(&["--command", "s", "--tls-key", "/certs/key.pem"]).expect("parse");
+        let err = cfg.validate().expect_err("unpaired key");
+        assert!(
+            err.contains("--tls-cert") && err.contains("--tls-key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tls_file_pair_is_accepted() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-key",
+            "/certs/key.pem",
+        ])
+        .expect("parse");
+        cfg.validate().expect("paired files are valid");
+        assert!(cfg.tls_enabled());
+    }
+
+    #[test]
+    fn tls_inline_pair_is_accepted() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert-pem",
+            "CERT",
+            "--tls-key-pem",
+            "KEY",
+        ])
+        .expect("parse");
+        cfg.validate().expect("paired inline PEM is valid");
+        assert!(cfg.tls_enabled());
+    }
+
+    #[test]
+    fn tls_inline_pem_accepts_leading_dashes() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert-pem",
+            "-----BEGIN CERTIFICATE-----",
+            "--tls-key-pem",
+            "-----BEGIN PRIVATE KEY-----",
+        ])
+        .expect("PEM starting with dashes parses as a value");
+        assert_eq!(
+            cfg.tls_cert_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----")
+        );
+        assert_eq!(
+            cfg.tls_key_pem.as_deref(),
+            Some("-----BEGIN PRIVATE KEY-----")
+        );
+    }
+
+    #[test]
+    fn tls_file_and_inline_for_cert_are_mutually_exclusive() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-cert-pem",
+            "CERT",
+            "--tls-key",
+            "/certs/key.pem",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("both cert sources");
+        assert!(err.contains("--tls-cert"), "{err}");
+    }
+
+    #[test]
+    fn tls_file_and_inline_for_key_are_mutually_exclusive() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-key",
+            "/certs/key.pem",
+            "--tls-key-pem",
+            "KEY",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("both key sources");
+        assert!(err.contains("--tls-key"), "{err}");
+    }
+
+    #[test]
+    fn tls_client_ca_sources_are_mutually_exclusive() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-key",
+            "/certs/key.pem",
+            "--tls-client-ca",
+            "/certs/ca.pem",
+            "--tls-client-ca-pem",
+            "CA",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("both CA sources");
+        assert!(err.contains("--tls-client-ca"), "{err}");
+    }
+
+    #[test]
+    fn manual_cert_and_acme_conflict() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-key",
+            "/certs/key.pem",
+            "--acme-domain",
+            "example.com",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("manual plus ACME");
+        assert!(err.contains("--acme"), "{err}");
+    }
+
+    #[test]
+    fn inline_cert_and_acme_conflict() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert-pem",
+            "CERT",
+            "--tls-key-pem",
+            "KEY",
+            "--acme-email",
+            "ops@example.com",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("inline manual plus ACME");
+        assert!(err.contains("--acme"), "{err}");
+    }
+
+    #[test]
+    fn acme_alone_implies_tls() {
+        let cfg = parse(&["--command", "s", "--acme-domain", "example.com"]).expect("parse");
+        cfg.validate().expect("ACME alone is valid");
+        assert!(cfg.uses_acme());
+        assert!(cfg.tls_enabled());
+    }
+
+    #[test]
+    fn acme_domains_accept_repeat_and_comma_forms() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--acme-domain",
+            "a.example.com,b.example.com",
+            "--acme-domain",
+            "c.example.com",
+        ])
+        .expect("parse");
+        assert_eq!(
+            cfg.acme_domains,
+            ["a.example.com", "b.example.com", "c.example.com"]
+        );
+        cfg.validate().expect("ACME domains are valid");
+    }
+
+    #[test]
+    fn mtls_alone_is_rejected_without_server_identity() {
+        let cfg = parse(&["--command", "s", "--tls-client-ca", "/certs/ca.pem"]).expect("parse");
+        assert!(cfg.uses_mtls());
+        assert!(cfg.tls_enabled(), "mTLS implies TLS mode");
+        let err = cfg.validate().expect_err("mTLS without a server cert");
+        assert!(err.contains("--tls-client-ca"), "{err}");
+    }
+
+    #[test]
+    fn mtls_with_manual_cert_is_accepted() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--tls-cert",
+            "/certs/cert.pem",
+            "--tls-key",
+            "/certs/key.pem",
+            "--tls-client-ca",
+            "/certs/ca.pem",
+        ])
+        .expect("parse");
+        cfg.validate().expect("mTLS with a manual cert is valid");
+        assert!(cfg.uses_mtls() && cfg.tls_enabled());
+    }
+
+    #[test]
+    fn mtls_with_acme_is_accepted() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--acme-domain",
+            "example.com",
+            "--tls-client-ca-pem",
+            "CA",
+        ])
+        .expect("parse");
+        cfg.validate().expect("mTLS with ACME is valid");
+    }
+
+    #[test]
+    fn debug_redacts_key_material() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--api-key",
+            "s3cr3t",
+            "--tls-cert-pem",
+            "CERT-BODY",
+            "--tls-key-pem",
+            "KEY-BODY",
+        ])
+        .expect("parse");
+        let rendered = format!("{cfg:?}");
+        for secret in ["s3cr3t", "CERT-BODY", "KEY-BODY"] {
+            assert!(!rendered.contains(secret), "leaked {secret:?}: {rendered}");
         }
     }
 }

@@ -16,8 +16,19 @@ exclude = [".beads/"]
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"
+instant-acme = {
+  version = "0.8",
+  default-features = false,
+  features = [
+    "hyper-rustls",
+    "rcgen",
+    "ring",
+  ],
+  optional = true
+}
 rmcp = {
   version = "=3.5.1",
   default-features = false,
@@ -29,17 +40,23 @@ rmcp = {
     "transport-streamable-http-server-session",
   ]
 }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 subtle = "2.6"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+x509-parser = "0.18"
 
 [dev-dependencies]
 http-body-util = "0.1"
+rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 # Test-only: the HTTP client transport drives the proxy the way a real MCP client would.
 rmcp = {
@@ -51,6 +68,9 @@ rmcp = {
   ]
 }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+acme = ["dep:instant-acme"]
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

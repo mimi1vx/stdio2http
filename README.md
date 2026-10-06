@@ -73,7 +73,8 @@ Verify it is up:
 curl -fsS localhost:8080/healthz   # -> ok
 ```
 
-Then point any Streamable HTTP MCP client at `http://<host>:8080/mcp`.
+Then point any Streamable HTTP MCP client at `http://<host>:8080/mcp`
+(or `https://<host>:8080/mcp` when TLS is configured — see below).
 
 ## Configuration
 
@@ -96,6 +97,17 @@ Flags and environment variables, no config file. Every flag has a matching
 | `--log-level` | `STDIO2HTTP_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
 | `--init-timeout-ms` | `STDIO2HTTP_INIT_TIMEOUT_MS` | `10000` | Budget for spawn plus handshake |
 | `--disable-allowed-hosts` | `STDIO2HTTP_DISABLE_ALLOWED_HOSTS` | `false` | Accept every `Host` header |
+| `--tls-cert` | `STDIO2HTTP_TLS_CERT` | — | Server cert chain (PEM file); pairs with `--tls-key` |
+| `--tls-key` | `STDIO2HTTP_TLS_KEY` | — | Server private key (PEM file); pairs with `--tls-cert` |
+| `--tls-cert-pem` | `STDIO2HTTP_TLS_CERT_PEM` | — | Inline server cert PEM; exclusive with `--tls-cert` |
+| `--tls-key-pem` | `STDIO2HTTP_TLS_KEY_PEM` | — | Inline server key PEM; exclusive with `--tls-key` |
+| `--tls-client-ca` | `STDIO2HTTP_TLS_CLIENT_CA` | — | Client CA bundle (PEM file); enables mTLS |
+| `--tls-client-ca-pem` | `STDIO2HTTP_TLS_CLIENT_CA_PEM` | — | Inline client CA PEM; exclusive with `--tls-client-ca` |
+| `--acme-email` | `STDIO2HTTP_ACME_EMAIL` | — | Contact email for the ACME account |
+| `--acme-domain` | `STDIO2HTTP_ACME_DOMAINS` | — | Domain to issue for; repeat or comma-separate |
+| `--acme-cache-dir` | `STDIO2HTTP_ACME_CACHE_DIR` | — | Dir holding the ACME account + cert cache |
+| `--acme-directory-url` | `STDIO2HTTP_ACME_DIRECTORY_URL` | LE prod | ACME directory URL; staging override for tests |
+| `--acme-http-port` | `STDIO2HTTP_ACME_HTTP_PORT` | `80` | Port for the ACME HTTP-01 challenge listener |
 
 A concrete example:
 
@@ -159,13 +171,136 @@ The upstream server must actually read that key to act on it. If it does not,
 this mode degrades to `bearer`: authenticated, but the child cannot tell callers
 apart.
 
+## TLS / HTTPS
+
+Without TLS flags the listener speaks plain HTTP. Set any TLS input — a
+manual cert, ACME, or a client CA — and the same `host:port` speaks HTTPS
+only: plain-HTTP clients on that port fail at the TLS handshake; nothing is
+redirected. Startup logs the certificate subject, expiry, and SHA-256
+fingerprint plus `mtls`/`acme` flags. Key material is never logged.
+
+Flag combinations are validated at startup: cert and key must pair, file and
+inline sources are mutually exclusive per side, manual certs cannot be
+combined with ACME, and mTLS needs a server certificate or ACME.
+
+### Manual certificate (files)
+
+```sh
+stdio2http --command /usr/local/bin/some-mcp-server \
+  --tls-cert /certs/fullchain.pem \
+  --tls-key /certs/privkey.pem
+```
+
+Verify:
+
+```sh
+curl -k https://localhost:8080/healthz   # -> ok
+```
+
+### Inline certificate (secret injection)
+
+For orchestrators that inject secrets as environment variables rather than
+files, pass the PEM bodies directly. Values start with `-----BEGIN`, so on
+the CLI use the `=` form — a space-separated value would parse as a flag —
+or set the environment variables:
+
+```sh
+stdio2http --command /usr/local/bin/some-mcp-server \
+  --tls-cert-pem="$(cat /run/secrets/fullchain.pem)" \
+  --tls-key-pem="$(cat /run/secrets/privkey.pem)"
+```
+
+```sh
+export STDIO2HTTP_TLS_CERT_PEM="$(cat /run/secrets/fullchain.pem)"
+export STDIO2HTTP_TLS_KEY_PEM="$(cat /run/secrets/privkey.pem)"
+```
+
+### mTLS (client certificates)
+
+Pass a client CA bundle to require and verify client certificates:
+
+```sh
+stdio2http --command /usr/local/bin/some-mcp-server \
+  --tls-cert /certs/fullchain.pem \
+  --tls-key /certs/privkey.pem \
+  --tls-client-ca /certs/client-ca.pem
+```
+
+Verification happens at the TLS handshake, so it covers every path —
+`/healthz` included, not just `/mcp`. Kubernetes probes must therefore
+present a client certificate too:
+
+```sh
+curl -k --cert /certs/probe.pem --key /certs/probe-key.pem \
+  https://localhost:8080/healthz   # -> ok
+```
+
+`--auth-mode` applies unchanged on top of mTLS (defense in depth). If
+per-path verification matters — open `/healthz`, authenticated `/mcp` —
+terminate mTLS at a reverse proxy instead.
+
+### ACME auto-issuance
+
+Zero-touch certificates via HTTP-01. Requires a binary built with the
+`acme` cargo feature (`cargo build --features acme`); without it, startup
+bails telling you to rebuild:
+
+```sh
+stdio2http --command /usr/local/bin/some-mcp-server --host 0.0.0.0 \
+  --acme-email ops@example.com \
+  --acme-domain mcp.example.com \
+  --acme-cache-dir /var/lib/stdio2http/acme
+```
+
+The HTTP-01 challenge listener binds `0.0.0.0:<acme-http-port>` (default
+`80`) for the process lifetime, so that port must be reachable from the
+internet. Certificates renew below 30 days of expiry (plus up to 6h of jitter),
+and the cache dir (created `0700`, files `0600`) lets restarts reuse the
+account and certificate instead of re-issuing. While testing, point at the
+staging directory to stay clear of rate limits:
+
+```sh
+--acme-directory-url https://acme-staging-v02.api.letsencrypt.org/directory
+```
+
+### Reverse proxy instead
+
+If you prefer termination in front, run the proxy itself without TLS flags
+and let the proxy handle certificates. Caddy:
+
+```caddy
+mcp.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+Minimal nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp.example.com;
+    ssl_certificate /etc/ssl/fullchain.pem;
+    ssl_certificate_key /etc/ssl/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+}
+```
+
 ## Limitations
 
 These are deliberate and load-bearing.
 
-1. **No TLS.** The proxy speaks plain HTTP. Run it behind a terminating proxy or
-   on a trusted network. An API key crossing an untrusted network in cleartext
-   is an API key in the wrong hands.
+1. **TLS is opt-in per listener.** Without TLS flags the proxy speaks plain
+   HTTP — run it behind a terminating proxy or on a trusted network. An API
+   key crossing an untrusted network in cleartext is an API key in the wrong
+   hands. With a certificate (manual or ACME) configured, that `host:port`
+   speaks HTTPS only. Remaining caveats: mTLS verification is
+   handshake-wide, so `/healthz` also requires a client cert; ACME only does
+   HTTP-01 on `--acme-http-port`; there is no dual HTTP+HTTPS listener.
 2. **Shared upstream state.** One child serves every caller, so any state it
    keeps per connection is shared across all HTTP callers. Fine for a
    single-tenant container; not a multi-tenant boundary.
@@ -210,6 +345,10 @@ cargo clippy --all-targets -- -D warnings
 
 The end-to-end tests build and spawn a deterministic fixture MCP server from
 `tests/fixtures/mock-mcp-server/`, so `cargo test` needs no network access.
+
+Dependencies update via weekly grouped Dependabot PRs (`cargo` +
+`github-actions` + `docker`, see `.github/dependabot.yml`); merge bar is
+green CI, with the `rmcp` streamable-feature check noted in `AGENTS.md`.
 
 ### Release
 

@@ -36,3 +36,15 @@ COPY --from=builder /build/target/release/stdio2http /usr/local/bin/stdio2http
 USER nobody:nogroup
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/stdio2http"]
+
+# TLS notes (no image change — usage only):
+# - Manual cert: mount the cert + key read-only; `nobody` needs read
+#   permission on the mount, nothing more.
+#     docker run --rm -p 443:8080 -v certs:/certs:ro stdio2http \
+#       --command ... --tls-cert /certs/fullchain.pem --tls-key /certs/privkey.pem
+# - ACME auto-issuance (binary built with `--features acme`): the cache dir
+#   must be writable by `nobody`, so mount it RW.
+#     docker run --rm -p 8080:8080 -p 80:80 -v acme-cache:/var/lib/stdio2http/acme:rw stdio2http \
+#       --command ... --host 0.0.0.0 \
+#       --acme-email ops@example.com --acme-domain mcp.example.com \
+#       --acme-cache-dir /var/lib/stdio2http/acme

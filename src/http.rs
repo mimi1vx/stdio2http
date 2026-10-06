@@ -1,6 +1,7 @@
 //! Axum wiring: `/healthz`, the `/mcp` Streamable HTTP mount, graceful shutdown.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -127,10 +128,25 @@ async fn shutdown_signal() {
 
 /// Serve until a shutdown signal arrives, then return so the caller can reap the child.
 ///
+/// A configured certificate (or ACME selection) switches the listener to
+/// HTTPS-only TLS on the same `host:port`; plain HTTP on that port then fails
+/// at the handshake instead of serving. mTLS, when configured, is enforced by
+/// rustls for every connection — `/healthz` included — while `/mcp` auth
+/// modes apply unchanged on top.
+///
 /// # Errors
 ///
-/// Returns an error if the listener cannot be bound or the server fails.
+/// Returns an error if the address cannot be bound, the TLS identity cannot
+/// be loaded, or the server fails.
 pub async fn serve(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+    if cfg.tls_enabled() {
+        serve_tls(cfg, upstream).await
+    } else {
+        serve_plain(cfg, upstream).await
+    }
+}
+
+async fn serve_plain(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
     let listener = bind(cfg).await?;
     let local = listener
         .local_addr()
@@ -141,6 +157,183 @@ pub async fn serve(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("HTTP server failed")
+}
+
+async fn serve_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+    if cfg.has_manual_cert() {
+        serve_manual_tls(cfg, upstream).await
+    } else if cfg.uses_acme() {
+        serve_acme(cfg, upstream).await
+    } else {
+        // mTLS-alone: `Config::validate` rejects this; fail closed here too so
+        // a caller that skipped validation still gets the same message.
+        anyhow::bail!(
+            "--tls-client-ca* requires a server certificate (--tls-cert/--tls-key) or ACME (--acme-domain)"
+        )
+    }
+}
+
+async fn serve_manual_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+    let addr = cfg.socket_addr();
+    let material = crate::tls::load(cfg).context("TLS setup failed")?;
+    let info = &material.info;
+    tracing::info!(
+        %addr,
+        path = %cfg.mcp_path,
+        subject = %info.subject,
+        expiry = %info.expiry,
+        fingerprint = %info.fingerprint,
+        mtls = info.mtls,
+        acme = cfg.uses_acme(),
+        "stdio2http listening (https)"
+    );
+
+    let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(material.server_config));
+    let handle = axum_server::Handle::new();
+    let shutdown = handle.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        shutdown.graceful_shutdown(None);
+    });
+
+    axum_server::tls_rustls::bind_rustls(addr, tls)
+        .handle(handle)
+        .serve(router(cfg, upstream).into_make_service())
+        .await
+        .context("HTTPS server failed")
+}
+
+/// Serve HTTPS with an ACME-issued certificate, renewing in the background.
+///
+/// Bind order matters: the HTTP-01 challenge listener goes up first and stays
+/// for the process lifetime (renewals need it), then `ensure_cert_with`
+/// issues into the same shared token map the listener serves.
+async fn serve_acme(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+    use crate::acme::{AcmeConfig, AcmeManager, ChallengeTokens, serve_challenges};
+
+    let acme_cfg = AcmeConfig::from_config(cfg).map_err(anyhow::Error::msg)?;
+    let manager = AcmeManager::load_or_create(acme_cfg.clone()).await?;
+
+    // The CA dials this port from outside, so it binds all interfaces rather
+    // than `cfg.host`.
+    let challenge_addr = std::net::SocketAddr::from(([0, 0, 0, 0], acme_cfg.http_port));
+    let challenge_listener = tokio::net::TcpListener::bind(challenge_addr)
+        .await
+        .with_context(|| format!("failed to bind ACME challenge listener on {challenge_addr}"))?;
+    let tokens = ChallengeTokens::new();
+    {
+        let tokens = tokens.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                serve_challenges(challenge_listener, tokens, shutdown_signal()).await
+            {
+                tracing::error!(error = format!("{error:#}"), "ACME challenge server failed");
+            }
+        });
+    }
+
+    // Without the `acme` feature this bails with the rebuild hint; with it,
+    // this issues (or skips when the cache is fresh) into the shared map.
+    manager.ensure_cert_with(&tokens).await?;
+
+    let snapshot = manager
+        .cert_handle()
+        .current()
+        .context("ACME issuance produced no certificate")?;
+    // mTLS-with-ACME: the client CA still comes from `Config`.
+    let ca_pem = crate::tls::client_ca_pem(cfg).context("TLS setup failed")?;
+    let material = crate::tls::build(
+        snapshot.cert_pem.as_bytes(),
+        snapshot.key_pem.as_bytes(),
+        ca_pem.as_deref(),
+    )
+    .context("TLS setup failed")?;
+    let info = &material.info;
+    let addr = cfg.socket_addr();
+    tracing::info!(
+        %addr,
+        path = %cfg.mcp_path,
+        subject = %info.subject,
+        expiry = %info.expiry,
+        fingerprint = %info.fingerprint,
+        mtls = info.mtls,
+        acme = true,
+        "stdio2http listening (https)"
+    );
+
+    let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(material.server_config));
+    let handle = axum_server::Handle::new();
+    let shutdown = handle.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        shutdown.graceful_shutdown(None);
+    });
+
+    // Renewals publish into the same shared map the challenge listener serves.
+    // Dropping the handle detaches the task; it runs for the process lifetime.
+    #[cfg(feature = "acme")]
+    let _renewal_task = AcmeManager::spawn_renewal_task(&manager, tokens.clone());
+
+    // Rotation watcher: renewals install into the shared handle; poll the
+    // generation counter and reload the acceptor without dropping connections.
+    {
+        let cert = manager.cert_handle();
+        let tls = tls.clone();
+        let seen = snapshot.generation;
+        tokio::spawn(async move {
+            rotation_watcher(cert, tls, ca_pem, seen).await;
+        });
+    }
+
+    axum_server::tls_rustls::bind_rustls(addr, tls)
+        .handle(handle)
+        .serve(router(cfg, upstream).into_make_service())
+        .await
+        .context("HTTPS server failed")
+}
+
+/// Poll the shared cert handle; on generation change, rebuild via
+/// `tls::build` and swap with `reload_from_config`.
+///
+/// A full rebuild (rather than `reload_from_pem`) preserves the mTLS verifier:
+/// axum-server's PEM reload helper installs `with_no_client_auth`, which would
+/// silently drop client-certificate enforcement after the first rotation.
+/// Never logs key material, only the new fingerprint and expiry.
+async fn rotation_watcher(
+    cert: crate::acme::SharedCert,
+    tls: axum_server::tls_rustls::RustlsConfig,
+    ca_pem: Option<Vec<u8>>,
+    mut seen: u64,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let Some(snapshot) = cert.current() else {
+            continue;
+        };
+        if snapshot.generation == seen {
+            continue;
+        }
+        seen = snapshot.generation;
+        match crate::tls::build(
+            snapshot.cert_pem.as_bytes(),
+            snapshot.key_pem.as_bytes(),
+            ca_pem.as_deref(),
+        ) {
+            Ok(material) => {
+                tls.reload_from_config(Arc::new(material.server_config));
+                tracing::info!(
+                    generation = snapshot.generation,
+                    expiry = ?snapshot.expiry,
+                    fingerprint = %material.info.fingerprint,
+                    "ACME certificate rotated"
+                );
+            }
+            Err(error) => tracing::warn!(
+                error = format!("{error:#}"),
+                "ACME rotated chain failed to load; keeping the previous certificate"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

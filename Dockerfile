@@ -6,17 +6,18 @@ WORKDIR /build
 
 # Dependency layer: cached until Cargo.toml/Cargo.lock change.
 COPY Cargo.toml Cargo.lock ./
+ARG BIN_FEATURES=""
 RUN mkdir -p src \
     && echo 'fn main() {}' > src/main.rs \
     && echo '' > src/lib.rs \
-    && cargo build --release --locked \
+    && cargo build --release --locked ${BIN_FEATURES:+--features $BIN_FEATURES} \
     && rm -rf src
 
 COPY src ./src
 # Touch so cargo sees the real sources as newer than the placeholder build.
 # The release profile already sets strip = true.
 RUN touch src/main.rs src/lib.rs \
-    && cargo build --release --locked
+    && cargo build --release --locked ${BIN_FEATURES:+--features $BIN_FEATURES}
 
 # Runtime stage. The proxy binary is self-contained, so nothing but CA roots is
 # needed to run it.

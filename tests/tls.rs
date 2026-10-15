@@ -194,16 +194,17 @@ impl TlsClient {
     }
 
     fn config(&self) -> Arc<rustls::ClientConfig> {
+        use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-        let certs = rustls_pemfile::certs(&mut &*self.ca_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("CA PEM parses");
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_slice_iter(self.ca_pem.as_slice())
+                .collect::<Result<Vec<_>, _>>()
+                .expect("CA PEM parses");
         assert!(!certs.is_empty(), "CA PEM holds a certificate");
         let mut roots = rustls::RootCertStore::empty();
         for cert in certs {
-            let owned = CertificateDer::from(cert.as_ref().to_vec());
-            roots.add(owned).expect("CA enters the root store");
+            roots.add(cert).expect("CA enters the root store");
         }
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -213,18 +214,15 @@ impl TlsClient {
             .with_root_certificates(roots);
 
         let mut config = if let Some((cert_pem, key_pem)) = &self.identity {
-            let chain = rustls_pemfile::certs(&mut &cert_pem[..])
-                .collect::<Result<Vec<CertificateDer<'_>>, _>>()
-                .expect("client cert PEM parses")
-                .into_iter()
-                .map(|cert| CertificateDer::from(cert.as_ref().to_vec()))
-                .collect::<Vec<_>>();
+            let chain: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_slice_iter(cert_pem.as_slice())
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("client cert PEM parses");
             assert!(!chain.is_empty(), "client PEM holds a certificate");
-            let key: PrivateKeyDer<'_> = rustls_pemfile::private_key(&mut &key_pem[..])
-                .expect("client key PEM parses")
-                .expect("client PEM holds a key");
+            let key: PrivateKeyDer<'static> =
+                PrivateKeyDer::from_pem_slice(key_pem.as_slice()).expect("client key PEM parses");
             builder
-                .with_client_auth_cert(chain, key.clone_key())
+                .with_client_auth_cert(chain, key)
                 .expect("client identity loads")
         } else {
             builder.with_no_client_auth()

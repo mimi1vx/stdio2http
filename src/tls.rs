@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::server::danger::ClientCertVerifier;
@@ -109,7 +110,7 @@ pub fn fingerprint_sha256(der: &[u8]) -> String {
 /// certificate, or [`TlsError::Verifier`] when the verifier cannot be built.
 pub fn client_verifier(ca_pem: &[u8]) -> Result<Arc<dyn ClientCertVerifier>, TlsError> {
     ensure_default_provider();
-    let certs = rustls_pemfile::certs(&mut &*ca_pem)
+    let certs = CertificateDer::pem_slice_iter(ca_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| TlsError::BadClientCa)?;
     if certs.is_empty() {
@@ -144,23 +145,20 @@ pub fn build(
     ca_pem: Option<&[u8]>,
 ) -> Result<TlsMaterial, TlsError> {
     ensure_default_provider();
-    let certs = rustls_pemfile::certs(&mut &*cert_pem)
-        .collect::<Result<Vec<CertificateDer<'_>>, _>>()
+    let certs = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .map_err(|_| TlsError::BadCertificate)?;
     if certs.is_empty() {
         return Err(TlsError::BadCertificate);
     }
-    // First key wins; multi-key files are a misconfiguration, not a feature.
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .map_err(|_| TlsError::BadPrivateKey)?
-        .ok_or(TlsError::NoPrivateKey)?;
-    // `PrivateKeyDer` borrows the PEM buffer; the server config must own its
-    // secret, so clone the key into a `'static` value.
-    let key: PrivateKeyDer<'static> = key.clone_key();
-    let certs: Vec<CertificateDer<'static>> = certs
-        .into_iter()
-        .map(|cert| CertificateDer::from(cert.as_ref().to_vec()))
-        .collect();
+    // First key wins; multi-key files are a misconfiguration, not a feature:
+    // `from_pem_slice` decodes the first key section and ignores the rest.
+    // `from_pem_slice` already yields an owned `'static` key, so no clone is
+    // needed. `NoItemsFound` means no key section was present at all.
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|err| match err {
+        pem::Error::NoItemsFound => TlsError::NoPrivateKey,
+        _ => TlsError::BadPrivateKey,
+    })?;
 
     let mtls = ca_pem.is_some();
     let builder = if let Some(ca_pem) = ca_pem {

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/mimi1vx/stdio2http/compare/v0.2.0...v0.2.1) - 2026-10-15
+
+### Added
+
+- publish Docker image to GHCR on release (default + acme)
+
+### Fixed
+
+- migrate PEM parsing to pki-types PemObject, drop rustls-pemfile
+
+### Other
+
+- bump the gha-deps group with 5 updates
+- bump the cargo-deps group with 3 updates
+
 ## [0.2.0](https://github.com/mimi1vx/stdio2http/compare/v0.1.0...v0.2.0) - 2026-10-06
 
 ### Added

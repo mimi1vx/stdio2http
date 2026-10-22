@@ -224,6 +224,16 @@ The upstream server must actually read that key to act on it. If it does not,
 this mode degrades to `bearer`: authenticated, but the child cannot tell callers
 apart.
 
+### Request metadata (`_meta`)
+
+In every auth mode, the proxy forwards the client's own `params._meta`
+entries (custom keys, trace context, …) to the upstream child alongside the
+caller stamp above. Two keys never pass through as the client sent them:
+`io.stdio2http/caller` is always set by the proxy alone — a client-sent value
+is spoofing and is stripped in every auth mode, including `none` — and
+`progressToken` is dropped because it belongs to the HTTP session's progress
+subscription (rmcp mints a fresh token for the upstream leg).
+
 ## TLS / HTTPS
 
 Without TLS flags the listener speaks plain HTTP. Set any TLS input — a
@@ -359,8 +369,9 @@ These are deliberate and load-bearing.
    single-tenant container; not a multi-tenant boundary.
 3. **Identity is advisory, not isolation.** Identity reaches the child as
    `_meta` on a request, not as process isolation or per-caller environment
-   variables. A child that ignores the key cannot tell callers apart, and a
-   malicious caller controls the `_meta` it sends.
+   variables. A child that ignores the key cannot tell callers apart. Custom
+   `_meta` keys the client sends are forwarded, but `io.stdio2http/caller`
+   is always set by the proxy — a client cannot spoof another caller's identity.
 
 ## Known gap: notifications and server→client requests do not forward
 

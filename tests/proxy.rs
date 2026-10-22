@@ -13,7 +13,7 @@ use rmcp::ClientHandler;
 use rmcp::model::{CallToolRequestParams, CallToolResponse, ContentBlock, JsonObject, Tool};
 use rmcp::service::{Peer, RoleClient, RunningService, ServiceExt as _};
 use rmcp::transport::StreamableHttpClientTransport;
-use serde_json::json;
+use serde_json::{Value, json};
 use stdio2http::config::Config;
 use stdio2http::http;
 use stdio2http::upstream::Upstream;
@@ -482,6 +482,148 @@ async fn a_child_that_exits_before_initializing_is_fatal() {
         rendered.contains("true"),
         "the error must name the program: {rendered}"
     );
+}
+
+#[tokio::test]
+async fn spoofed_caller_meta_never_reaches_the_child() {
+    let harness = start(&[]).await;
+    let session = raw_handshake(&harness).await;
+
+    let result = raw_rpc(
+        &harness,
+        &session,
+        2,
+        "tools/call",
+        json!({
+            "name": "whoami",
+            "arguments": {},
+            "_meta": {
+                "io.stdio2http/caller": "mallory",
+                "custom": "keep-me",
+            },
+        }),
+    )
+    .await;
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|content| content.first())
+        .and_then(|block| block.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("whoami result has no text content: {result}"));
+    assert_eq!(
+        text, "<none>",
+        "a client-set caller must never reach the child"
+    );
+}
+
+/// A raw MCP session over plain HTTP: the id the server issued plus the
+/// protocol version it negotiated.
+struct RawSession {
+    id: String,
+    version: String,
+}
+
+/// Parse a Streamable HTTP POST body: either one JSON object or SSE `data:` lines.
+fn response_events(body: &str) -> Vec<Value> {
+    if body.trim_start().starts_with('{') {
+        return vec![serde_json::from_str(body).expect("response body is JSON")];
+    }
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|data| !data.is_empty())
+        .map(|data| serde_json::from_str(data).expect("SSE data is JSON"))
+        .collect()
+}
+
+fn post_raw(uri: &str, body: &Value, session: Option<&RawSession>) -> reqwest::RequestBuilder {
+    let client = reqwest::Client::new();
+    let request = client
+        .post(uri)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(body);
+    match session {
+        Some(session) => request
+            .header("mcp-session-id", &session.id)
+            .header("mcp-protocol-version", &session.version),
+        None => request,
+    }
+}
+
+/// Full handshake over raw HTTP: `initialize` (id 1), then `notifications/initialized`.
+async fn raw_handshake(harness: &Harness) -> RawSession {
+    let uri = format!("http://{}/mcp", harness.addr);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "raw-e2e", "version": "0.0.0"},
+        },
+    });
+    let response = post_raw(&uri, &body, None)
+        .send()
+        .await
+        .expect("initialize is answered");
+    assert_eq!(response.status(), 200, "initialize must succeed");
+    let id = response
+        .headers()
+        .get("mcp-session-id")
+        .expect("initialize issues a session id")
+        .to_str()
+        .expect("session id is ascii")
+        .to_owned();
+    let text = response.text().await.expect("body reads");
+    let version = response_events(&text)
+        .iter()
+        .find(|event| event.get("id") == Some(&json!(1)))
+        .and_then(|event| event.get("result"))
+        .and_then(|result| result.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no initialize result in {text:?}"))
+        .to_owned();
+    let session = RawSession { id, version };
+
+    let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    let response = post_raw(&uri, &initialized, Some(&session))
+        .send()
+        .await
+        .expect("initialized is accepted");
+    assert_eq!(response.status(), 202, "initialized must be accepted");
+    session
+}
+
+/// One request/response round-trip inside `session`, returning the `result`.
+async fn raw_rpc(
+    harness: &Harness,
+    session: &RawSession,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Value {
+    let uri = format!("http://{}/mcp", harness.addr);
+    let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let response = post_raw(&uri, &body, Some(session))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{method} is answered: {error}"));
+    assert_eq!(response.status(), 200, "{method} must succeed");
+    let text = response.text().await.expect("body reads");
+    let event = response_events(&text)
+        .into_iter()
+        .find(|event| event.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("no {method} event in {text:?}"));
+    if let Some(error) = event.get("error") {
+        panic!("server answered with a JSON-RPC error: {error}");
+    }
+    event
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("response has neither result nor error: {event}"))
 }
 
 /// Assert the proxy answers 401 with a challenge, and echoes no key.

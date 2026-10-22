@@ -202,6 +202,32 @@ pub fn renewal_delay_with_jitter(base: Duration, seed: u64) -> Duration {
     base.checked_add(jitter).unwrap_or(Duration::MAX)
 }
 
+/// Real expiry of the first certificate in `chain_pem`.
+///
+/// Reads the leaf `notAfter` so renewal is scheduled from what the CA
+/// actually issued rather than [`ASSUMED_CERT_LIFETIME`].
+///
+/// # Errors
+///
+/// Returns an error when the PEM cannot be parsed or the timestamp is out of
+/// range for `SystemTime`.
+#[cfg_attr(not(feature = "acme"), allow(dead_code))]
+fn leaf_not_after(chain_pem: &str) -> Result<SystemTime> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(chain_pem.as_bytes())
+        .map_err(|_| anyhow::anyhow!("ACME certificate is not valid PEM"))?;
+    let cert = pem
+        .parse_x509()
+        .map_err(|_| anyhow::anyhow!("ACME certificate is not valid X.509"))?;
+    let timestamp = cert.validity().not_after.timestamp();
+    if timestamp < 0 {
+        anyhow::bail!("ACME certificate has a pre-epoch notAfter");
+    }
+    let seconds = u64::try_from(timestamp).context("ACME certificate notAfter is out of range")?;
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds))
+        .context("ACME certificate notAfter is out of range")
+}
+
 /// Reject domains the CA cannot issue for over HTTP-01.
 ///
 /// # Errors
@@ -391,6 +417,10 @@ pub fn load_cache(cache_dir: &Path) -> Result<Option<AcmeCache>> {
 /// Persist the cache, creating the directory with `0700` and the file with
 /// `0600` on unix.
 ///
+/// The write is atomic: bytes go to `<cache-dir>/acme-cache.json.tmp` (created
+/// `0600` from the start, so secrets are never world-readable) and are
+/// renamed over the cache only after `sync_all` succeeds.
+///
 /// # Errors
 ///
 /// Returns an error when the directory or file cannot be created or written.
@@ -410,14 +440,42 @@ pub fn store_cache(cache_dir: &Path, cache: &AcmeCache) -> Result<()> {
             .with_context(|| format!("failed to create {}", cache_dir.display()))?;
     }
     let path = cache_path(cache_dir);
+    let tmp_path = cache_dir.join(format!("{CACHE_FILE_NAME}.tmp"));
     let bytes = serde_json::to_vec_pretty(cache).context("failed to serialize ACME cache")?;
-    std::fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to chmod {}", path.display()))?;
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
     }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+    }
+    std::fs::rename(&tmp_path, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp_path);
+        anyhow::Error::new(error).context(format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -940,9 +998,14 @@ impl AcmeManager {
             .context("failed to fetch certificate")?;
         tokens.clear();
 
-        let expiry = SystemTime::now()
-            .checked_add(ASSUMED_CERT_LIFETIME)
-            .unwrap_or(SystemTime::now());
+        let now = SystemTime::now();
+        let expiry = leaf_not_after(&chain_pem).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "ACME certificate notAfter unreadable; assuming 90-day lifetime"
+            );
+            now.checked_add(ASSUMED_CERT_LIFETIME).unwrap_or(now)
+        });
         tracing::info!(
             domains = ?self.config.domains,
             expiry = ?expiry,
@@ -1169,6 +1232,80 @@ mod tests {
         cache.version = CACHE_VERSION + 1;
         store_cache(&dir, &cache).expect("writable");
         assert!(load_cache(&dir).is_err(), "version drift must fail");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn leaf_not_after_reads_real_expiry() {
+        use rcgen::{CertificateParams, KeyPair};
+
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is post-epoch")
+            .as_secs();
+        let not_after_unix = now_unix + 10 * 24 * 3600;
+        let not_after = time::OffsetDateTime::from_unix_timestamp(
+            i64::try_from(not_after_unix).expect("timestamp fits"),
+        )
+        .expect("valid not_after");
+        let not_before = time::OffsetDateTime::from_unix_timestamp(
+            i64::try_from(now_unix.saturating_sub(60)).expect("timestamp fits"),
+        )
+        .expect("valid not_before");
+        let mut params =
+            CertificateParams::new(vec!["example.com".to_string()]).expect("params build");
+        params.not_before = not_before;
+        params.not_after = not_after;
+        let key = KeyPair::generate().expect("key generates");
+        let cert = params.self_signed(&key).expect("self-signs");
+        let parsed = leaf_not_after(&cert.pem()).expect("leaf parses");
+        let parsed_unix = parsed
+            .duration_since(UNIX_EPOCH)
+            .expect("leaf is post-epoch")
+            .as_secs();
+        let drift = parsed_unix.abs_diff(not_after_unix);
+        assert!(
+            drift <= 60,
+            "not_after {parsed_unix} drifts {drift}s from expected {not_after_unix}"
+        );
+    }
+
+    #[test]
+    fn leaf_not_after_rejects_garbage() {
+        assert!(leaf_not_after("not a pem").is_err());
+        assert!(leaf_not_after("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_cache_writes_0600_and_leaves_no_tmp() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = unique_temp_dir("cache-0600");
+        let cache = sample_cache();
+        store_cache(&dir, &cache).expect("writable");
+        let mode = std::fs::metadata(cache_path(&dir))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "cache file is owner-only, got {mode:o}");
+        let tmp = dir.join(format!("{CACHE_FILE_NAME}.tmp"));
+        assert!(!tmp.exists(), "no tmp file left behind");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn store_cache_replaces_existing_file() {
+        let dir = unique_temp_dir("cache-replace");
+        let mut first = sample_cache();
+        first.account_credentials = "{\"id\":\"first\"}".to_string();
+        store_cache(&dir, &first).expect("first write");
+        let mut second = sample_cache();
+        second.account_credentials = "{\"id\":\"second\"}".to_string();
+        store_cache(&dir, &second).expect("second write");
+        let back = load_cache(&dir).expect("readable").expect("present");
+        assert_eq!(back.account_credentials, second.account_credentials);
         std::fs::remove_dir_all(&dir).ok();
     }
 

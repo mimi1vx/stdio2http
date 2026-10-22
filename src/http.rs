@@ -59,6 +59,39 @@ fn server_config(cfg: &Config, token: CancellationToken) -> StreamableHttpServer
     config
 }
 
+/// CORS layer answering browser preflight for the configured origins.
+///
+/// Returns `None` when no `--allowed-origin` is set, leaving routing (and
+/// auth) untouched. The layer is an exact-origin allowlist: no wildcards, no
+/// credentials, and only the preflight itself bypasses auth — every actual
+/// data request still passes through the auth layer below.
+fn cors_layer(cfg: &Config) -> Option<tower_http::cors::CorsLayer> {
+    if cfg.allowed_origins.is_empty() {
+        return None;
+    }
+    // Invalid entries cannot reach here through `Config::validate`; skip
+    // them so a hand-built config still fails closed instead of panicking.
+    let origins: Vec<http::HeaderValue> = cfg
+        .allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
+        .collect();
+    Some(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+            .allow_methods([http::Method::GET, http::Method::POST, http::Method::DELETE])
+            .allow_headers(tower_http::cors::AllowHeaders::list([
+                http::header::AUTHORIZATION,
+                http::header::CONTENT_TYPE,
+                http::HeaderName::from_static("x-api-key"),
+                http::HeaderName::from_static("mcp-session-id"),
+                http::HeaderName::from_static("mcp-protocol-version"),
+                http::HeaderName::from_static("last-event-id"),
+            ]))
+            .expose_headers([http::HeaderName::from_static("mcp-session-id")]),
+    )
+}
+
 /// Mount a Streamable HTTP service behind the auth layer, leaving `/healthz` open.
 ///
 /// Generic over the service so tests can substitute a stub for the real child.
@@ -78,7 +111,7 @@ where
     // Session binding sits inside auth: auth (outer) sets `Principal`, the
     // session layer (inner) checks it. Keep this order; swapping the two
     // would run the check before the principal exists.
-    let guarded = axum::routing::MethodRouter::new()
+    let mut guarded = axum::routing::MethodRouter::new()
         .on_service(ALL_METHODS, mcp)
         .layer(axum::middleware::from_fn_with_state(
             crate::session_owner::SessionOwners::default(),
@@ -88,6 +121,13 @@ where
             AuthState::new(cfg.auth_mode, &cfg.api_keys),
             crate::auth::require,
         ));
+
+    // CORS wraps auth (outermost): it answers preflight for configured
+    // origins before auth runs, while every other request still passes
+    // through auth. Added last so the layer ordering above is unaffected.
+    if let Some(cors) = cors_layer(cfg) {
+        guarded = guarded.layer(cors);
+    }
 
     Router::new().route(&cfg.mcp_path, guarded).route(
         "/healthz",
@@ -700,5 +740,125 @@ mod tests {
         let (status, body, _) = call_authed(app, "k1", Some("sess-order")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"mcp-ok");
+    }
+
+    /// A browser preflight: OPTIONS with Origin and Access-Control-Request-Method.
+    fn preflight(origin: &str) -> http::Request<axum::body::Body> {
+        http::Request::builder()
+            .uri("/mcp")
+            .method(http::Method::OPTIONS)
+            .header(http::header::ORIGIN, origin)
+            .header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(axum::body::Body::empty())
+            .expect("request builds")
+    }
+
+    /// Drive the router with a fully built request.
+    async fn call_request(
+        app: Router,
+        req: http::Request<axum::body::Body>,
+    ) -> http::Response<axum::body::Body> {
+        app.oneshot(req).await.expect("router always responds")
+    }
+
+    #[tokio::test]
+    async fn preflight_from_allowed_origin_succeeds_without_key() {
+        let cfg = config(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "bearer",
+            "--api-key",
+            "k",
+            "--allowed-origin",
+            "https://app.example.com",
+        ]);
+
+        let response = call_request(
+            router_with(&cfg, stub_service(), || true),
+            preflight("https://app.example.com"),
+        )
+        .await;
+
+        assert!(
+            response.status().is_success(),
+            "preflight from a configured origin must succeed, got {}",
+            response.status()
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&http::HeaderValue::from_static("https://app.example.com")),
+            "preflight must echo the allowed origin",
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_from_unknown_origin_gets_no_allow_origin() {
+        let cfg = config(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "bearer",
+            "--api-key",
+            "k",
+            "--allowed-origin",
+            "https://app.example.com",
+        ]);
+
+        let response = call_request(
+            router_with(&cfg, stub_service(), || true),
+            preflight("https://evil.example.com"),
+        )
+        .await;
+
+        assert!(
+            !response
+                .headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "unlisted origins must get no access-control-allow-origin header, got {:?}",
+            response.headers(),
+        );
+    }
+
+    #[tokio::test]
+    async fn options_without_configured_origins_still_needs_a_key() {
+        let cfg = config(&["--command", "s", "--auth-mode", "bearer", "--api-key", "k"]);
+
+        let response = call_request(
+            router_with(&cfg, stub_service(), || true),
+            preflight("https://app.example.com"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn non_options_requests_still_need_a_key_with_origins_configured() {
+        let cfg = config(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "bearer",
+            "--api-key",
+            "k",
+            "--allowed-origin",
+            "https://app.example.com",
+        ]);
+
+        let response = call_request(
+            router_with(&cfg, stub_service(), || true),
+            http::Request::builder()
+                .uri("/mcp")
+                .method(http::Method::POST)
+                .header(http::header::ORIGIN, "https://app.example.com")
+                .body(axum::body::Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

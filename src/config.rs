@@ -393,6 +393,13 @@ impl Config {
         if self.tls_cert.is_some() && self.tls_cert_pem.is_some() {
             return Err("--tls-cert and --tls-cert-pem are mutually exclusive".to_string());
         }
+        for origin in &self.allowed_origins {
+            if origin.parse::<http::HeaderValue>().is_err() {
+                return Err(format!(
+                    "--allowed-origin {origin:?} is not a valid Origin header value"
+                ));
+            }
+        }
         if self.tls_key.is_some() && self.tls_key_pem.is_some() {
             return Err("--tls-key and --tls-key-pem are mutually exclusive".to_string());
         }
@@ -896,6 +903,33 @@ mod tests {
         ])
         .expect("parse");
         cfg.validate().expect("mTLS with ACME is valid");
+    }
+
+    #[test]
+    fn allowed_origins_accept_valid_entries() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--allowed-origin",
+            "https://app.example.com",
+        ])
+        .expect("parse");
+        cfg.validate().expect("valid origin is accepted");
+    }
+
+    #[test]
+    fn allowed_origins_reject_values_that_are_not_header_values() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--allowed-origin",
+            "https://example.com\nEvil: 1",
+        ])
+        .expect("parse");
+        let err = cfg
+            .validate()
+            .expect_err("a newline is not a valid header value");
+        assert!(err.contains("--allowed-origin"), "{err}");
     }
 
     #[test]

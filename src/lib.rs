@@ -3,5 +3,6 @@ pub mod auth;
 pub mod config;
 pub mod http;
 pub mod proxy;
+pub mod session_owner;
 pub mod tls;
 pub mod upstream;

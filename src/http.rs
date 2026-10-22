@@ -75,8 +75,15 @@ where
     S::Future: Send + 'static,
     F: Fn() -> bool + Clone + Send + Sync + 'static,
 {
+    // Session binding sits inside auth: auth (outer) sets `Principal`, the
+    // session layer (inner) checks it. Keep this order; swapping the two
+    // would run the check before the principal exists.
     let guarded = axum::routing::MethodRouter::new()
         .on_service(ALL_METHODS, mcp)
+        .layer(axum::middleware::from_fn_with_state(
+            crate::session_owner::SessionOwners::default(),
+            crate::session_owner::enforce,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             AuthState::new(cfg.auth_mode, &cfg.api_keys),
             crate::auth::require,
@@ -590,5 +597,108 @@ mod tests {
         let (status, _) = call(router_with(&cfg, stub_service(), || true), "/nope").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A stub that mints a session id when the request carries none, mimicking
+    /// rmcp's `initialize` without a child process.
+    #[derive(Clone, Copy)]
+    struct SessionIssuingStub;
+
+    impl Service<http::Request<axum::body::Body>> for SessionIssuingStub {
+        type Response = axum::response::Response;
+        type Error = Infallible;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<axum::body::Body>) -> Self::Future {
+            Box::pin(async move {
+                if req.headers().contains_key("mcp-session-id") {
+                    Ok(axum::response::Response::new(axum::body::Body::from(
+                        "mcp-ok",
+                    )))
+                } else {
+                    Ok(axum::response::Response::builder()
+                        .header("mcp-session-id", "sess-order")
+                        .body(axum::body::Body::from("created"))
+                        .expect("response builds"))
+                }
+            })
+        }
+    }
+
+    /// Drive the router with a key and an optional session id.
+    async fn call_authed(
+        app: Router,
+        key: &str,
+        session: Option<&str>,
+    ) -> (StatusCode, Vec<u8>, Option<String>) {
+        let mut builder = http::Request::builder()
+            .uri("/mcp")
+            .method(http::Method::POST)
+            .header(http::header::AUTHORIZATION, format!("Bearer {key}"));
+        if let Some(id) = session {
+            builder = builder.header("mcp-session-id", id);
+        }
+        let response = app
+            .oneshot(
+                builder
+                    .body(axum::body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router always responds");
+        let status = response.status();
+        let new_session = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes()
+            .to_vec();
+        (status, body, new_session)
+    }
+
+    #[tokio::test]
+    async fn session_layer_sits_inside_auth() {
+        let cfg = config(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "bearer",
+            "--api-key",
+            "k1",
+            "--api-key",
+            "k2",
+        ]);
+        let app = router_with(&cfg, SessionIssuingStub, || true);
+
+        let (status, _, issued) = call_authed(app.clone(), "k1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(issued.as_deref(), Some("sess-order"));
+
+        // Another key reusing the session is denied: enforce saw Principal(1)
+        // set by the outer auth layer. With the layers swapped, enforce would
+        // run before auth, see no principal, and let this through with 200.
+        let (status, body, _) = call_authed(app.clone(), "k2", Some("sess-order")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, b"Not Found: Session not found");
+
+        // The owning key still passes.
+        let (status, body, _) = call_authed(app, "k1", Some("sess-order")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"mcp-ok");
     }
 }

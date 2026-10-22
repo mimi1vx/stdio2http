@@ -301,9 +301,11 @@ These are deliberate and load-bearing.
    speaks HTTPS only. Remaining caveats: mTLS verification is
    handshake-wide, so `/healthz` also requires a client cert; ACME only does
    HTTP-01 on `--acme-http-port`; there is no dual HTTP+HTTPS listener.
-2. **Shared upstream state.** One child serves every caller, so any state it
-   keeps per connection is shared across all HTTP callers. Fine for a
-   single-tenant container; not a multi-tenant boundary.
+2. **Session binding, shared upstream state.** MCP sessions (`Mcp-Session-Id`)
+   are bound to the authenticating key: a request carrying a session id it did
+   not create gets `404 Not Found: Session not found`. One child still serves
+   every caller, so any state it keeps per connection is shared across all HTTP
+   callers. Fine for a single-tenant container; not a multi-tenant boundary.
 3. **Identity is advisory, not isolation.** Identity reaches the child as
    `_meta` on a request, not as process isolation or per-caller environment
    variables. A child that ignores the key cannot tell callers apart. Custom

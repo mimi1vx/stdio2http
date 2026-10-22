@@ -29,10 +29,23 @@ const API_KEY_HEADER: HeaderName = HeaderName::from_static("x-api-key");
 #[derive(Clone, Debug)]
 pub struct Caller(pub String);
 
+/// Marker extension identifying which configured key authenticated the request.
+///
+/// Holds the index of the matched key in [`AuthState`]'s key list, never the
+/// secret itself, so session ownership can be bound without logging risk.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Principal(pub usize);
+
 /// The authenticated subject of the request, if this layer authenticated one.
 #[must_use]
 pub fn caller(extensions: &http::Extensions) -> Option<&Caller> {
     extensions.get::<Caller>()
+}
+
+/// The authenticating key's identity, if this layer authenticated one.
+#[must_use]
+pub fn principal(extensions: &http::Extensions) -> Option<Principal> {
+    extensions.get::<Principal>().copied()
 }
 
 /// One configured API key plus the subject it authenticates.
@@ -93,7 +106,11 @@ impl fmt::Debug for ApiKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthOutcome {
     /// Allowed; `subject` is the configured subject for the presented key, if any.
-    Allowed { subject: Option<String> },
+    /// `key_index` is the matched key's position, identifying the principal.
+    Allowed {
+        subject: Option<String>,
+        key_index: Option<usize>,
+    },
     /// Rejected. `challenge` is the WWW-Authenticate value to send back.
     Rejected { challenge: String },
 }
@@ -103,7 +120,7 @@ impl AuthOutcome {
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
         match self {
-            Self::Allowed { subject } => subject.as_deref(),
+            Self::Allowed { subject, .. } => subject.as_deref(),
             Self::Rejected { .. } => None,
         }
     }
@@ -119,15 +136,20 @@ fn rejected() -> AuthOutcome {
 #[must_use]
 pub fn authenticate(mode: AuthMode, keys: &[ApiKey], presented: Option<&str>) -> AuthOutcome {
     if mode == AuthMode::None {
-        return AuthOutcome::Allowed { subject: None };
+        return AuthOutcome::Allowed {
+            subject: None,
+            key_index: None,
+        };
     }
     let Some(presented) = presented else {
         return rejected();
     };
     keys.iter()
-        .find(|key| key.matches(presented))
-        .map_or_else(rejected, |key| AuthOutcome::Allowed {
+        .enumerate()
+        .find(|(_, key)| key.matches(presented))
+        .map_or_else(rejected, |(index, key)| AuthOutcome::Allowed {
             subject: Some(key.subject().to_string()),
+            key_index: Some(index),
         })
 }
 
@@ -165,7 +187,10 @@ impl AuthState {
                 )
                     .into_response()
             }
-            AuthOutcome::Allowed { subject } => {
+            AuthOutcome::Allowed { subject, key_index } => {
+                if let Some(index) = key_index {
+                    request.extensions_mut().insert(Principal(index));
+                }
                 // Only identity-forward hands the child a subject; bearer mode
                 // authenticates the caller but leaves the child unable to tell
                 // callers apart.
@@ -241,7 +266,10 @@ mod tests {
         for presented in [None, Some(""), Some("garbage")] {
             assert_eq!(
                 authenticate(AuthMode::None, &keys(&[SECRET]), presented),
-                AuthOutcome::Allowed { subject: None },
+                AuthOutcome::Allowed {
+                    subject: None,
+                    key_index: None,
+                },
                 "{presented:?}"
             );
         }
@@ -251,7 +279,10 @@ mod tests {
     fn mode_none_ignores_the_configured_keys() {
         assert_eq!(
             authenticate(AuthMode::None, &[], Some(SECRET)),
-            AuthOutcome::Allowed { subject: None }
+            AuthOutcome::Allowed {
+                subject: None,
+                key_index: None,
+            }
         );
     }
 
@@ -275,7 +306,8 @@ mod tests {
         assert_eq!(
             outcome,
             AuthOutcome::Allowed {
-                subject: Some(SECRET.to_string())
+                subject: Some(SECRET.to_string()),
+                key_index: Some(0),
             }
         );
         assert_eq!(outcome.subject(), Some(SECRET));
@@ -296,7 +328,8 @@ mod tests {
             assert_eq!(
                 authenticate(mode, &configured, Some(SECRET)),
                 AuthOutcome::Allowed {
-                    subject: Some(SECRET.to_string())
+                    subject: Some(SECRET.to_string()),
+                    key_index: Some(0),
                 }
             );
         }
@@ -353,7 +386,8 @@ mod tests {
         assert_eq!(
             authenticate(AuthMode::Bearer, &state.keys, Some(SECRET)),
             AuthOutcome::Allowed {
-                subject: Some(SECRET.to_string())
+                subject: Some(SECRET.to_string()),
+                key_index: Some(0),
             }
         );
         assert_eq!(
@@ -370,6 +404,11 @@ mod tests {
         caller(request.extensions()).map_or_else(|| "anonymous".into(), |caller| caller.0.clone())
     }
 
+    async fn echo_principal(State(_state): State<AuthState>, request: Request<Body>) -> String {
+        principal(request.extensions())
+            .map_or_else(|| "none".to_string(), |principal| principal.0.to_string())
+    }
+
     fn protected_router(mode: AuthMode, specs: &[&str]) -> Router {
         let specs: Vec<String> = specs.iter().map(|spec| (*spec).to_string()).collect();
         let state = AuthState::new(mode, &specs);
@@ -379,6 +418,17 @@ mod tests {
                 any(echo_subject).layer(from_fn_with_state(state.clone(), require)),
             )
             .route("/healthz", get(|| async { "ok" }))
+            .with_state(state)
+    }
+
+    fn principal_router(mode: AuthMode, specs: &[&str]) -> Router {
+        let specs: Vec<String> = specs.iter().map(|spec| (*spec).to_string()).collect();
+        let state = AuthState::new(mode, &specs);
+        Router::new()
+            .route(
+                "/mcp",
+                any(echo_principal).layer(from_fn_with_state(state.clone(), require)),
+            )
             .with_state(state)
     }
 
@@ -521,6 +571,47 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(body_of(response).await, "anonymous");
         }
+    }
+
+    #[tokio::test]
+    async fn bearer_attaches_the_key_index_as_principal() {
+        let app = principal_router(AuthMode::Bearer, &["k1=alice", "k2=bob"]);
+        for (key, index) in [("k1", "0"), ("k2", "1")] {
+            let response = call(
+                app.clone(),
+                Request::builder()
+                    .uri("/mcp")
+                    .header(AUTHORIZATION, format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body_of(response).await, index, "key {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_forward_attaches_principal_alongside_caller() {
+        let app = principal_router(AuthMode::IdentityForward, &["k1=alice"]);
+        let response = call(
+            app,
+            Request::builder()
+                .uri("/mcp")
+                .header(AUTHORIZATION, "Bearer k1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "0");
+    }
+
+    #[tokio::test]
+    async fn mode_none_attaches_no_principal() {
+        let response = call(principal_router(AuthMode::None, &[]), request("/mcp")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "none");
     }
 
     #[tokio::test]

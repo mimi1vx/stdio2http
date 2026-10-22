@@ -561,8 +561,16 @@ fn post_raw(uri: &str, body: &Value, session: Option<&RawSession>) -> reqwest::R
     }
 }
 
-/// Full handshake over raw HTTP: `initialize` (id 1), then `notifications/initialized`.
-async fn raw_handshake(harness: &Harness) -> RawSession {
+fn with_auth(builder: reqwest::RequestBuilder, key: Option<&str>) -> reqwest::RequestBuilder {
+    if let Some(key) = key {
+        builder.header("authorization", format!("Bearer {key}"))
+    } else {
+        builder
+    }
+}
+
+/// Full handshake over raw HTTP with an optional credential.
+async fn raw_handshake_with_key(harness: &Harness, key: Option<&str>) -> RawSession {
     let uri = format!("http://{}/mcp", harness.addr);
     let body = json!({
         "jsonrpc": "2.0",
@@ -574,7 +582,7 @@ async fn raw_handshake(harness: &Harness) -> RawSession {
             "clientInfo": {"name": "raw-e2e", "version": "0.0.0"},
         },
     });
-    let response = post_raw(&uri, &body, None)
+    let response = with_auth(post_raw(&uri, &body, None), key)
         .send()
         .await
         .expect("initialize is answered");
@@ -598,12 +606,17 @@ async fn raw_handshake(harness: &Harness) -> RawSession {
     let session = RawSession { id, version };
 
     let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-    let response = post_raw(&uri, &initialized, Some(&session))
+    let response = with_auth(post_raw(&uri, &initialized, Some(&session)), key)
         .send()
         .await
         .expect("initialized is accepted");
     assert_eq!(response.status(), 202, "initialized must be accepted");
     session
+}
+
+/// Full handshake over raw HTTP: `initialize` (id 1), then `notifications/initialized`.
+async fn raw_handshake(harness: &Harness) -> RawSession {
+    raw_handshake_with_key(harness, None).await
 }
 
 /// One request/response round-trip inside `session`, returning the `result`.
@@ -614,9 +627,21 @@ async fn raw_rpc(
     method: &str,
     params: Value,
 ) -> Value {
+    raw_rpc_with_key(harness, session, id, method, params, None).await
+}
+
+/// Same as [`raw_rpc`] with an optional credential.
+async fn raw_rpc_with_key(
+    harness: &Harness,
+    session: &RawSession,
+    id: i64,
+    method: &str,
+    params: Value,
+    key: Option<&str>,
+) -> Value {
     let uri = format!("http://{}/mcp", harness.addr);
     let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-    let response = post_raw(&uri, &body, Some(session))
+    let response = with_auth(post_raw(&uri, &body, Some(session)), key)
         .send()
         .await
         .unwrap_or_else(|error| panic!("{method} is answered: {error}"));
@@ -633,6 +658,136 @@ async fn raw_rpc(
         .get("result")
         .cloned()
         .unwrap_or_else(|| panic!("response has neither result nor error: {event}"))
+}
+
+/// POST inside `session` with a credential, returning status and body for
+/// negative assertions.
+async fn raw_post_status(
+    harness: &Harness,
+    session: &RawSession,
+    id: i64,
+    method: &str,
+    params: Value,
+    key: Option<&str>,
+) -> (reqwest::StatusCode, String) {
+    let uri = format!("http://{}/mcp", harness.addr);
+    let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let response = with_auth(post_raw(&uri, &body, Some(session)), key)
+        .send()
+        .await
+        .expect("proxy answers");
+    let status = response.status();
+    let text = response.text().await.expect("body reads");
+    (status, text)
+}
+
+fn bearer_harness_args() -> Vec<&'static str> {
+    vec![
+        "--auth-mode",
+        "bearer",
+        "--api-key",
+        KEY_ALICE,
+        "--api-key",
+        KEY_BOB,
+    ]
+}
+
+#[tokio::test]
+async fn another_key_cannot_delete_a_session() {
+    let harness = start(&bearer_harness_args()).await;
+    let alice = raw_handshake_with_key(&harness, Some(KEY_ALICE)).await;
+
+    let uri = format!("http://{}/mcp", harness.addr);
+    let response = reqwest::Client::new()
+        .delete(&uri)
+        .header("mcp-session-id", &alice.id)
+        .header("mcp-protocol-version", &alice.version)
+        .header("authorization", format!("Bearer {KEY_BOB}"))
+        .send()
+        .await
+        .expect("proxy answers");
+    assert_eq!(response.status(), 404);
+    assert_eq!(
+        response.text().await.expect("body reads"),
+        "Not Found: Session not found"
+    );
+
+    let result = raw_rpc_with_key(
+        &harness,
+        &alice,
+        2,
+        "tools/list",
+        json!({}),
+        Some(KEY_ALICE),
+    )
+    .await;
+    assert!(
+        result.get("tools").is_some(),
+        "owner session still works: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn another_key_cannot_resume_a_session() {
+    let harness = start(&bearer_harness_args()).await;
+    let alice = raw_handshake_with_key(&harness, Some(KEY_ALICE)).await;
+
+    let uri = format!("http://{}/mcp", harness.addr);
+    let response = reqwest::Client::new()
+        .get(&uri)
+        .header("mcp-session-id", &alice.id)
+        .header("mcp-protocol-version", &alice.version)
+        .header("last-event-id", "0/0")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", format!("Bearer {KEY_BOB}"))
+        .send()
+        .await
+        .expect("proxy answers");
+    assert_eq!(response.status(), 404);
+    assert_eq!(
+        response.text().await.expect("body reads"),
+        "Not Found: Session not found"
+    );
+}
+
+#[tokio::test]
+async fn another_key_cannot_post_to_a_session() {
+    let harness = start(&bearer_harness_args()).await;
+    let alice = raw_handshake_with_key(&harness, Some(KEY_ALICE)).await;
+
+    let (status, body) =
+        raw_post_status(&harness, &alice, 2, "tools/list", json!({}), Some(KEY_BOB)).await;
+    assert_eq!(status, 404);
+    assert_eq!(body, "Not Found: Session not found");
+}
+
+#[tokio::test]
+async fn owner_can_delete_own_session() {
+    let harness = start(&bearer_harness_args()).await;
+    let alice = raw_handshake_with_key(&harness, Some(KEY_ALICE)).await;
+
+    let uri = format!("http://{}/mcp", harness.addr);
+    let response = reqwest::Client::new()
+        .delete(&uri)
+        .header("mcp-session-id", &alice.id)
+        .header("mcp-protocol-version", &alice.version)
+        .header("authorization", format!("Bearer {KEY_ALICE}"))
+        .send()
+        .await
+        .expect("proxy answers");
+    assert_eq!(response.status(), 202);
+
+    let (status, body) = raw_post_status(
+        &harness,
+        &alice,
+        2,
+        "tools/list",
+        json!({}),
+        Some(KEY_ALICE),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body, "Not Found: Session not found");
 }
 
 /// Assert the proxy answers 401 with a challenge, and echoes no key.

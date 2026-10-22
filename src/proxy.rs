@@ -54,10 +54,24 @@ fn stamp_caller<T: rmcp::model::RequestParamsMeta>(
     params: &mut T,
     context: &RequestContext<RoleServer>,
 ) {
-    if let Some(subject) = caller_of(context) {
+    insert_subject(params, caller_of(context));
+}
+
+fn insert_subject<T: rmcp::model::RequestParamsMeta>(params: &mut T, subject: Option<String>) {
+    if let Some(subject) = subject {
         params.meta_or_default().insert(
             CALLER_META_KEY.to_string(),
             serde_json::Value::String(subject),
+        );
+    }
+}
+
+/// List requests may omit `params`; create them only when there is a caller to stamp.
+fn insert_subject_paginated(request: &mut Option<PaginatedRequestParams>, subject: Option<String>) {
+    if subject.is_some() {
+        insert_subject(
+            request.get_or_insert_with(PaginatedRequestParams::default),
+            subject,
         );
     }
 }
@@ -78,9 +92,7 @@ impl ServerHandler for ProxyHandler {
         mut request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        if let Some(params) = request.as_mut() {
-            stamp_caller(params, &context);
-        }
+        insert_subject_paginated(&mut request, caller_of(&context));
         self.peer
             .list_tools(request)
             .await
@@ -104,9 +116,7 @@ impl ServerHandler for ProxyHandler {
         mut request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        if let Some(params) = request.as_mut() {
-            stamp_caller(params, &context);
-        }
+        insert_subject_paginated(&mut request, caller_of(&context));
         self.peer
             .list_resources(request)
             .await
@@ -118,9 +128,7 @@ impl ServerHandler for ProxyHandler {
         mut request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        if let Some(params) = request.as_mut() {
-            stamp_caller(params, &context);
-        }
+        insert_subject_paginated(&mut request, caller_of(&context));
         self.peer
             .list_resource_templates(request)
             .await
@@ -144,9 +152,7 @@ impl ServerHandler for ProxyHandler {
         mut request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
-        if let Some(params) = request.as_mut() {
-            stamp_caller(params, &context);
-        }
+        insert_subject_paginated(&mut request, caller_of(&context));
         self.peer
             .list_prompts(request)
             .await
@@ -211,5 +217,46 @@ impl ServerHandler for ProxyHandler {
             request.method,
             None,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caller_in(request: Option<&PaginatedRequestParams>) -> Option<&str> {
+        request?.meta.as_ref()?.get(CALLER_META_KEY)?.as_str()
+    }
+
+    #[test]
+    fn paginated_none_without_subject_stays_none() {
+        let mut request = None;
+        insert_subject_paginated(&mut request, None);
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn paginated_none_with_subject_gets_meta() {
+        let mut request = None;
+        insert_subject_paginated(&mut request, Some("alice".to_string()));
+        assert_eq!(caller_in(request.as_ref()), Some("alice"));
+    }
+
+    #[test]
+    fn paginated_existing_cursor_is_kept() {
+        let mut request =
+            Some(PaginatedRequestParams::default().with_cursor(Some("next".to_string())));
+        insert_subject_paginated(&mut request, Some("alice".to_string()));
+        let params = request.as_ref().expect("still present");
+        assert_eq!(params.cursor.as_deref(), Some("next"));
+        assert_eq!(caller_in(request.as_ref()), Some("alice"));
+    }
+
+    #[test]
+    fn subject_overwrites_spoofed_caller() {
+        let mut request = Some(PaginatedRequestParams::default());
+        insert_subject_paginated(&mut request, Some("mallory".to_string()));
+        insert_subject_paginated(&mut request, Some("alice".to_string()));
+        assert_eq!(caller_in(request.as_ref()), Some("alice"));
     }
 }

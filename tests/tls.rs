@@ -846,17 +846,8 @@ async fn tls_rejects_a_server_certificate_from_an_untrusted_ca() {
         None,
     )
     .await;
-    // No readiness poll here: it would burn the whole startup timeout, since
-    // every handshake fails by design. One attempt is enough — the positive
-    // tests prove the same binary comes up with these certs.
-    let untrusting = TlsClient::trust(&other.ca);
-    let outcome = get_healthz(&proxy, &untrusting).await;
-    assert!(
-        outcome.is_err(),
-        "a server certificate outside the trust store must fail verification"
-    );
-
-    // Positive control on the same server: the right CA verifies fine.
+    // Positive control first: prove the server is listening before asserting
+    // the negative case, so a refusal cannot masquerade as a TLS rejection.
     let trusting = TlsClient::trust(&pki.ca);
     let start = Instant::now();
     let health = loop {
@@ -869,6 +860,13 @@ async fn tls_rejects_a_server_certificate_from_an_untrusted_ca() {
         }
     };
     assert_eq!(health.status, 200);
+
+    let untrusting = TlsClient::trust(&other.ca);
+    let outcome = get_healthz(&proxy, &untrusting).await;
+    assert!(
+        outcome.is_err(),
+        "a server certificate outside the trust store must fail verification"
+    );
 }
 
 #[tokio::test]

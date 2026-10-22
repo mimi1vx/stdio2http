@@ -51,74 +51,11 @@ cargo build --release
 ./target/release/stdio2http --command <program> [--arg <arg> ...]
 ```
 
-In a container:
-
-```sh
-docker build -t stdio2http .
-
-docker run --rm -p 8080:8080 stdio2http \
-  --command node \
-  --arg /app/dist/server.js \
-  --arg --stdio
-```
-
-Prebuilt images publish to `ghcr.io/mimi1vx/stdio2http` on each release
-for `linux/amd64` and `linux/arm64`:
-
-```sh
-docker pull ghcr.io/mimi1vx/stdio2http:latest
-
-docker run --rm -p 8080:8080 ghcr.io/mimi1vx/stdio2http:latest \
-  --command node \
-  --arg /app/dist/server.js \
-  --arg --stdio
-```
-
-Pin a release instead of tracking `latest`:
-
-```sh
-docker pull ghcr.io/mimi1vx/stdio2http:1.2.3
-```
-
-Tags:
-
-| Tag | Variant | Meaning |
-|---|---|---|
-| `:latest` | default | Newest release |
-| `:1.2.3` | default | That exact release |
-| `:1.2` | default | Newest `1.2.x` release |
-| `:1` | default | Newest `1.x` release |
-| `:sha-<commit>` | default | Release commit, e.g. `:sha-abc1234` |
-| `:latest-acme` | ACME | Newest release with ACME support |
-| `:1.2.3-acme` | ACME | That exact release with ACME support |
-| `:1.2-acme` | ACME | Newest `1.2.x` release with ACME support |
-| `:1-acme` | ACME | Newest `1.x` release with ACME support |
-| `:sha-<commit>-acme` | ACME | Release commit with ACME support |
-
-The `-acme` variants carry a binary built with `--features acme` and are
-the ones that accept `--acme-*` flags (see ACME auto-issuance below); the
-bare tags reject them at startup. Manual-cert flags (`--tls-cert`,
-`--tls-key`) work on either variant: mount the cert and key read-only, and
-keep any ACME cache dir writable by `nobody`.
-
-The prebuilt images hold the proxy binary plus CA roots only. The upstream
-runtime rule above applies unchanged: derive from the image and install
-whatever the child needs (node, python, ...) — the proxy alone cannot
-spawn a server whose interpreter is missing.
-
-The image smoke check is `--help`:
-
-```sh
-docker run --rm ghcr.io/mimi1vx/stdio2http:latest --help
-```
-
-It exercises image startup without a live upstream child, which any real
-`--command ...` run requires.
-
-> **The upstream runtime must exist in the image.** `stdio2http` spawns the
-> upstream as a child process, so whatever interpreter it needs — node, python,
-> go, bun — must be installed in your image too. The proxy binary alone cannot
-> spawn a server that has no interpreter.
+> **The upstream runtime must be installed where the proxy runs.**
+> `stdio2http` spawns the upstream as a child process, so whatever
+> interpreter it needs — node, python, go, bun — must be on `PATH`
+> (or given as an absolute `--command`). The proxy binary alone
+> cannot spawn a server that has no interpreter.
 
 Verify it is up:
 
@@ -165,7 +102,7 @@ Flags and environment variables, no config file. Every flag has a matching
 A concrete example:
 
 ```sh
-docker run --rm -p 8080:8080 stdio2http \
+stdio2http \
   --command /usr/local/bin/some-mcp-server \
   --child-env SOME_TOKEN=abc123 \
   --host 0.0.0.0 \
@@ -412,7 +349,7 @@ The end-to-end tests build and spawn a deterministic fixture MCP server from
 `tests/fixtures/mock-mcp-server/`, so `cargo test` needs no network access.
 
 Dependencies update via weekly grouped Dependabot PRs (`cargo` +
-`github-actions` + `docker`, see `.github/dependabot.yml`); merge bar is
+`github-actions`, see `.github/dependabot.yml`); merge bar is
 green CI, with the `rmcp` streamable-feature check noted in `AGENTS.md`.
 
 ### Release

@@ -13,7 +13,7 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 ```
 
 - Full e2e binary: `./target/release/stdio2http --command <program> [--arg ...]`
-- CI (`.github/workflows/ci.yml`): fmt + clippy + test (with fixture pre-build) + `audit-check` + docker build / `--help` smoke. Docker `healthz` check is help-only: the runtime stage ships no interpreter for a live upstream child.
+- CI (`.github/workflows/ci.yml`): fmt + clippy + test (with fixture pre-build) + `audit-check`.
 
 ## Architecture
 
@@ -32,13 +32,13 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 - `--api-key KEY` (bare) forwards the secret itself as `_meta["io.stdio2http/caller"]`; prefer `KEY=SUBJECT`. `identity-forward` is advisory `_meta`, not process isolation; shared upstream state is shared across all callers.
 - TLS is opt-in per listener (`src/tls.rs`, `src/acme.rs`): no TLS flags → plain HTTP; any cert/ACME/client-CA input → same `host:port` speaks HTTPS only, no redirect. ACME needs `cargo build --features acme`. mTLS verifies at the handshake so `/healthz` needs a client cert too.
 - Notifications and server→client requests do not forward (`progress`, `list_changed`, `logging/message`, `sampling`, `elicitation`, `roots`). A tool needing them fails — that is a design limit, not a bug to patch around.
-- `unsafe_code = "forbid"`, clippy `pedantic = warn`. Dockerfile is cached-deps multi-stage (`rust:1-slim-bookworm` → `debian:bookworm-slim`, `USER nobody`); the upstream interpreter (node/python/...) must be installed in the runtime image separately.
+- `unsafe_code = "forbid"`, clippy `pedantic = warn`. Single static binary; no container layer.
 - No `opencode.json`. `br`/`bd` is the issue tracker (see below).
 
 ## Dependency updates
 
-- `.github/dependabot.yml`: `cargo` + `github-actions` + `docker`, weekly, one grouped PR per ecosystem (`*`), `chore` prefix + `dependencies` label. No `ignore:` on `rmcp`.
-- Merge bar is green `ci.yml`: `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings`, fixture pre-build + `cargo test --locked`, `audit-check`, docker build + `--help` smoke.
+- `.github/dependabot.yml`: `cargo` + `github-actions`, weekly, one grouped PR per ecosystem (`*`), `chore` prefix + `dependencies` label. No `ignore:` on `rmcp`.
+- Merge bar is green `ci.yml`: `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings`, fixture pre-build + `cargo test --locked`, `audit-check`.
 - `rmcp` bumps additionally need `cargo tree -e features | grep streamable` showing `transport-streamable-http-server` + `-session` (never `local`) plus full `cargo test --locked` green.
 - `dtolnay/rust-toolchain@stable` tracks a branch, so expect few/no PRs for it by design.
 - Release is release-plz (`release.yml`): merge to `main`, then merge the bot's `release-pr` version-bump PR — never hand-edit versions/`CHANGELOG.md` or `cargo publish` (OIDC trusted publishing, no token).

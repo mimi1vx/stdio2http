@@ -24,15 +24,3 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "chore"
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      docker-deps:
-        patterns:
-          - "*"
-    labels:
-      - "dependencies"
-    commit-message:
-      prefix: "chore"

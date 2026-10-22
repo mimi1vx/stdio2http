@@ -50,12 +50,3 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: docker build -t stdio2http:ci .
-      # Help-only smoke: a healthz check would need a live MCP upstream child
-      # in the image, and the runtime stage ships no interpreter for one.
-      - run: docker run --rm stdio2http:ci --help

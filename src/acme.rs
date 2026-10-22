@@ -286,14 +286,26 @@ pub fn validate_directory_url(url: &str) -> std::result::Result<(), String> {
     if url.starts_with("https://") && url.len() > "https://".len() {
         return Ok(());
     }
-    for prefix in ["http://localhost", "http://127.0.0.1", "http://[::1]"] {
-        if url.starts_with(prefix) {
-            return Ok(());
-        }
+    let rejected = || {
+        format!(
+            "--acme-directory-url must be https:// (http:// only for loopback test servers), got {url:?}"
+        )
+    };
+    let uri: http::Uri = url.parse().map_err(|_| rejected())?;
+    let authority = uri.authority().ok_or_else(rejected)?;
+    if uri.scheme_str() != Some("http") || authority.as_str().contains('@') {
+        return Err(rejected());
     }
-    Err(format!(
-        "--acme-directory-url must be https:// (http:// only for loopback test servers), got {url:?}"
-    ))
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        Ok(())
+    } else {
+        Err(rejected())
+    }
 }
 
 /// On-disk ACME state: opaque account credentials plus the last chain.
@@ -1057,6 +1069,16 @@ mod tests {
         assert!(validate_directory_url("http://127.0.0.1:14000/dir").is_ok());
         assert!(validate_directory_url("http://acme.example.com/dir").is_err());
         assert!(validate_directory_url("ftp://example.com/dir").is_err());
+        assert!(validate_directory_url("http://127.0.0.1/dir").is_ok());
+        assert!(validate_directory_url("http://[::1]:14000/dir").is_ok());
+        for remote in [
+            "http://localhost.evil.example/dir",
+            "http://127.0.0.1.evil.example/dir",
+            "http://user@localhost/dir",
+            "http://example.com/dir",
+        ] {
+            assert!(validate_directory_url(remote).is_err(), "{remote}");
+        }
     }
 
     #[test]

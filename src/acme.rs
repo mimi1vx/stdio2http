@@ -843,7 +843,7 @@ impl AcmeManager {
                     &NewAccount {
                         contact,
                         terms_of_service_agreed: true,
-                        only_return_existing: true,
+                        only_return_existing: false,
                     },
                     directory_url,
                     None,

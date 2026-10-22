@@ -1,6 +1,7 @@
 //! The one long-lived stdio child, and the shared peer every HTTP session forwards through.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rmcp::model::ServerConfig;
@@ -90,7 +91,7 @@ impl Upstream {
                 format!("upstream MCP server {program:?} initialized without advertising its info")
             })?;
 
-        log_upstream(program, child_pid, &info, &peer).await;
+        log_upstream(program, child_pid, &info, &peer, cfg.init_timeout()).await;
 
         Ok(Self {
             service: Some(Arc::new(service)),
@@ -161,11 +162,16 @@ async fn log_upstream(
     pid: Option<u32>,
     info: &ServerConfig,
     peer: &Peer<RoleClient>,
+    timeout: Duration,
 ) {
-    let tool_count = match peer.list_tools(None).await {
-        Ok(result) => result.tools.len(),
-        Err(error) => {
+    let tool_count = match tokio::time::timeout(timeout, peer.list_tools(None)).await {
+        Ok(Ok(result)) => result.tools.len(),
+        Ok(Err(error)) => {
             tracing::warn!(%error, "could not list upstream tools at startup");
+            0
+        }
+        Err(_elapsed) => {
+            tracing::warn!("upstream did not answer tools/list at startup within {timeout:?}");
             0
         }
     };

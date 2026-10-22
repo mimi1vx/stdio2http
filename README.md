@@ -354,7 +354,7 @@ handles these explicitly is a different design.
 ```sh
 cargo build --locked --manifest-path tests/fixtures/mock-mcp-server/Cargo.toml
 cargo test --locked   # unit + end-to-end
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 ```
 
 The end-to-end tests spawn a deterministic fixture MCP server from

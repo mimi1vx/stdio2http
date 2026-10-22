@@ -364,6 +364,11 @@ impl Config {
                 self.mcp_path
             ));
         }
+        if self.mcp_path == "/healthz" {
+            return Err(
+                "--mcp-path must not be /healthz (reserved for the health check)".to_string(),
+            );
+        }
         match self.auth_mode {
             AuthMode::None => {}
             AuthMode::Bearer | AuthMode::IdentityForward => {
@@ -372,6 +377,16 @@ impl Config {
                         "--auth-mode {} requires at least one --api-key",
                         self.auth_mode.as_str()
                     ));
+                }
+                // Never echo the spec: it carries the secret.
+                if self
+                    .api_keys
+                    .iter()
+                    .any(|spec| crate::auth::ApiKey::parse(spec).is_none())
+                {
+                    return Err(
+                        "--api-key entries must have a non-empty key before '='".to_string()
+                    );
                 }
             }
         }
@@ -557,6 +572,45 @@ mod tests {
         let cfg = parse(&["--command", "s", "--mcp-path", "mcp"]).expect("parse");
         let err = cfg.validate().expect_err("relative path");
         assert!(err.contains("start with"), "{err}");
+    }
+
+    #[test]
+    fn mcp_path_healthz_is_rejected() {
+        let cfg = parse(&["--command", "s", "--mcp-path", "/healthz"]).expect("parse");
+        let err = cfg.validate().expect_err("reserved path");
+        assert!(err.contains("/healthz"), "{err}");
+    }
+
+    #[test]
+    fn api_key_without_key_part_is_rejected() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "bearer",
+            "--api-key",
+            "=alice",
+        ])
+        .expect("parse");
+        let err = cfg.validate().expect_err("empty key part");
+        assert!(err.contains("--api-key"), "{err}");
+        assert!(!err.contains("alice"), "must not echo the spec: {err}");
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_keys_are_rejected() {
+        let cfg = parse(&[
+            "--command",
+            "s",
+            "--auth-mode",
+            "identity-forward",
+            "--api-key",
+            "k1",
+            "--api-key",
+            "=x",
+        ])
+        .expect("parse");
+        cfg.validate().expect_err("one unparsable key");
     }
 
     #[test]

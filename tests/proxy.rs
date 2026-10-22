@@ -354,6 +354,34 @@ async fn bearer_mode_rejects_a_wrong_key() {
 }
 
 #[tokio::test]
+async fn x_api_key_header_accepts_a_configured_key() {
+    let harness = start(&["--auth-mode", "bearer", "--api-key", KEY_ALICE]).await;
+
+    let session = raw_handshake_with_x_api_key(&harness, Some(KEY_ALICE)).await;
+    let result = raw_rpc_with_x_api_key(
+        &harness,
+        &session,
+        2,
+        "tools/list",
+        json!({}),
+        Some(KEY_ALICE),
+    )
+    .await;
+    assert!(
+        result.get("tools").is_some(),
+        "tools/list over X-API-Key must succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn x_api_key_header_rejects_a_wrong_key() {
+    let harness = start(&["--auth-mode", "bearer", "--api-key", KEY_ALICE]).await;
+
+    let uri = format!("http://{}/mcp", harness.addr);
+    assert_401_x_api_key(&uri, Some(KEY_BOB)).await;
+}
+
+#[tokio::test]
 async fn identity_forward_yields_distinct_callers() {
     let harness = start(&[
         "--auth-mode",
@@ -788,6 +816,116 @@ async fn owner_can_delete_own_session() {
     .await;
     assert_eq!(status, 404);
     assert_eq!(body, "Not Found: Session not found");
+}
+
+fn with_x_api_key(builder: reqwest::RequestBuilder, key: Option<&str>) -> reqwest::RequestBuilder {
+    if let Some(key) = key {
+        builder.header("x-api-key", key)
+    } else {
+        builder
+    }
+}
+
+/// Full handshake over raw HTTP with the `X-API-Key` header.
+async fn raw_handshake_with_x_api_key(harness: &Harness, key: Option<&str>) -> RawSession {
+    let uri = format!("http://{}/mcp", harness.addr);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "raw-e2e", "version": "0.0.0"},
+        },
+    });
+    let response = with_x_api_key(post_raw(&uri, &body, None), key)
+        .send()
+        .await
+        .expect("initialize is answered");
+    assert_eq!(response.status(), 200, "initialize must succeed");
+    let id = response
+        .headers()
+        .get("mcp-session-id")
+        .expect("initialize issues a session id")
+        .to_str()
+        .expect("session id is ascii")
+        .to_owned();
+    let text = response.text().await.expect("body reads");
+    let version = response_events(&text)
+        .iter()
+        .find(|event| event.get("id") == Some(&json!(1)))
+        .and_then(|event| event.get("result"))
+        .and_then(|result| result.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no initialize result in {text:?}"))
+        .to_owned();
+    let session = RawSession { id, version };
+
+    let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    let response = with_x_api_key(post_raw(&uri, &initialized, Some(&session)), key)
+        .send()
+        .await
+        .expect("initialized is accepted");
+    assert_eq!(response.status(), 202, "initialized must be accepted");
+    session
+}
+
+/// One request/response round-trip inside `session` with the `X-API-Key` header.
+async fn raw_rpc_with_x_api_key(
+    harness: &Harness,
+    session: &RawSession,
+    id: i64,
+    method: &str,
+    params: Value,
+    key: Option<&str>,
+) -> Value {
+    let uri = format!("http://{}/mcp", harness.addr);
+    let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let response = with_x_api_key(post_raw(&uri, &body, Some(session)), key)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{method} is answered: {error}"));
+    assert_eq!(response.status(), 200, "{method} must succeed");
+    let text = response.text().await.expect("body reads");
+    let event = response_events(&text)
+        .into_iter()
+        .find(|event| event.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("no {method} event in {text:?}"));
+    if let Some(error) = event.get("error") {
+        panic!("server answered with a JSON-RPC error: {error}");
+    }
+    event
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("response has neither result nor error: {event}"))
+}
+
+/// Assert the proxy answers 401 with a challenge for the `X-API-Key` header.
+async fn assert_401_x_api_key(uri: &str, api_key: Option<&str>) {
+    let mut request = reqwest::Client::new()
+        .post(uri)
+        .header("content-type", "application/json")
+        .body(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#);
+    if let Some(key) = api_key {
+        request = request.header("x-api-key", key);
+    }
+
+    let response = request.send().await.expect("proxy answers");
+    assert_eq!(response.status(), 401, "expected a 401 for {api_key:?}");
+
+    let challenge = response
+        .headers()
+        .get("www-authenticate")
+        .expect("a challenge header is required")
+        .to_str()
+        .expect("challenge is ascii");
+    assert_eq!(challenge, "Bearer realm=\"mcp\"", "unexpected challenge");
+
+    let body = response.text().await.expect("body reads");
+    for leak in [KEY_ALICE, KEY_BOB] {
+        assert!(!body.contains(leak), "401 body leaked a key: {body}");
+    }
 }
 
 /// Assert the proxy answers 401 with a challenge, and echoes no key.

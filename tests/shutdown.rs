@@ -1,9 +1,9 @@
-//! Shutdown end-to-end: `SIGTERM` with an open SSE stream exits promptly.
+//! Shutdown end-to-end: `SIGTERM`/`SIGINT` with an open SSE stream exit promptly.
 //!
 //! Spawns the real `stdio2http` binary (plain HTTP), completes an MCP
 //! handshake, holds one standalone `GET /mcp` SSE stream open, then sends
-//! `SIGTERM`. The process must exit within the 3s drain deadline plus slack,
-//! and the upstream child must be reaped (its pid gone).
+//! `SIGTERM` or `SIGINT`. The process must exit within the 3s drain deadline
+//! plus slack, and the upstream child must be reaped (its pid gone).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -316,6 +316,63 @@ async fn sigterm_with_an_open_sse_stream_exits_within_the_drain_deadline() {
         status.success(),
         "a SIGTERM shutdown exits zero: {status:?}"
     );
+    // The stream held only by this test must not keep anything alive: dropping
+    // it here would otherwise be what finally lets the process go.
+    drop(sse);
+
+    assert!(
+        !child_alive(fixture_pid),
+        "the upstream child (pid {fixture_pid}) is reaped on shutdown"
+    );
+}
+
+#[tokio::test]
+async fn sigint_with_an_open_sse_stream_exits_within_the_drain_deadline() {
+    let mut proxy = spawn_plain().await;
+    let client = reqwest::Client::new();
+    let (session, version) = handshake(&client, proxy.addr).await;
+    let fixture_pid = proxy.fixture_pid();
+
+    // One idle standalone SSE stream: the shape that used to pin the process
+    // open past the deadline after SIGINT.
+    let sse = client
+        .get(format!("http://{}/mcp", proxy.addr))
+        .header("Accept", "text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .header("MCP-Protocol-Version", &version)
+        .timeout(IO_TIMEOUT)
+        .send()
+        .await
+        .expect("the SSE stream opens");
+    assert_eq!(sse.status(), 200, "the SSE stream is accepted");
+    assert!(
+        sse.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "the stream is an SSE stream"
+    );
+
+    let proxy_pid = proxy.child.as_ref().expect("proxy is running").id();
+    let sent = Command::new("kill")
+        .args(["-INT", &proxy_pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success(), "SIGINT is delivered");
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = proxy.try_exit() {
+            break status;
+        }
+        assert!(
+            start.elapsed() < EXIT_TIMEOUT,
+            "proxy with an open SSE stream must exit within {EXIT_TIMEOUT:?} of SIGINT"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(status.success(), "a SIGINT shutdown exits zero: {status:?}");
     // The stream held only by this test must not keep anything alive: dropping
     // it here would otherwise be what finally lets the process go.
     drop(sse);

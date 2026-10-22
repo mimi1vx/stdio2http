@@ -21,7 +21,7 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 - `src/config.rs` — clap + `STDIO2HTTP_*` env, no config file. Flags win over env.
 - `src/upstream.rs` — `TokioChildProcess` + `.serve()` → `Arc<Peer<RoleClient>>`. One long-lived child, `peer_info` snapshotted once. A dead child is fatal (non-zero exit, no restart).
 - `src/proxy.rs` — `ServerHandler` forwarding every method to the shared peer. Map failures to opaque `internal_error`; never leak child stderr or process env to the client.
-- `src/http.rs` — axum router: `/healthz` (`ok`) + `/mcp` via `StreamableHttpService` with `LocalSessionManager`. rmcp owns sessions/SSE/`Mcp-Session-Id`/negotiation — do not reimplement. `SIGTERM`/`SIGINT` shut down in ~1s and reap the child.
+- `src/http.rs` — axum router: `/healthz` (`ok`) + `/mcp` via `StreamableHttpService` with `LocalSessionManager`. rmcp owns sessions/SSE/`Mcp-Session-Id`/negotiation — do not reimplement. `SIGTERM`/`SIGINT` shut down within a few seconds (3s drain deadline) and reap the child.
 - `src/auth.rs` — tower layer on `/mcp` only; `/healthz` and CORS preflight stay open. Modes `none`/`bearer`/`identity-forward`. Keys via `Authorization: Bearer` or `X-API-Key`, constant-time compare (`subtle`), never logged. Missing and wrong keys give identical `401` + `WWW-Authenticate: Bearer realm="mcp"`.
 - `tests/proxy.rs` + `tests/fixtures/mock-mcp-server/` (`echo`, `whoami` tools) — e2e uses port `0`, real rmcp Streamable HTTP client.
 

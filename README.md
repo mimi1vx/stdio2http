@@ -393,7 +393,7 @@ handles these explicitly is a different design.
 - **A child that fails to start is fatal.** `stdio2http` exits non-zero; it does not restart the
   child. If the child dies later, calls fail with an opaque `internal_error`
   and the proxy still does not restart it. Let your orchestrator handle it.
-- **`SIGTERM`/`SIGINT` shut down gracefully**, within about a second, and reap
+- **`SIGTERM`/`SIGINT` shut down gracefully**, within a few seconds, and reap
   the child. Container stop signals work as expected.
 - **Startup logs** the child pid, upstream name and version, negotiated protocol
   version, and tool count. Upstream failures are logged locally and returned to

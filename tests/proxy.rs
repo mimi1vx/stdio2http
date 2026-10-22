@@ -118,7 +118,7 @@ async fn start(extra: &[&str]) -> Harness {
 
     let listener = http::bind(&cfg).await.expect("proxy binds");
     let addr = listener.local_addr().expect("listener has an address");
-    let router = http::router(&cfg, &upstream);
+    let router = http::router(&cfg, &upstream, tokio_util::sync::CancellationToken::new());
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });

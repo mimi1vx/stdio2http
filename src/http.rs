@@ -9,6 +9,7 @@ use axum::routing::{MethodFilter, get};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use crate::auth::AuthState;
@@ -29,9 +30,17 @@ const ALL_METHODS: MethodFilter = MethodFilter::GET
     .or(MethodFilter::PATCH)
     .or(MethodFilter::TRACE);
 
+/// Bound on the post-signal drain: open streams and stalled bodies are
+/// dropped once this elapses, so the process always exits promptly.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
 /// Build the rmcp transport configuration from our own config.
-fn server_config(cfg: &Config) -> StreamableHttpServerConfig {
+///
+/// Cancelling `token` ends the SSE streams the service holds open, which is
+/// what lets an idle `GET /mcp` stream stop pinning the process after a signal.
+fn server_config(cfg: &Config, token: CancellationToken) -> StreamableHttpServerConfig {
     let mut config = StreamableHttpServerConfig::default();
+    config.cancellation_token = token;
 
     if cfg.disable_allowed_hosts {
         tracing::warn!(
@@ -75,13 +84,13 @@ where
 }
 
 /// Build the router backed by the shared upstream child.
-pub fn router(cfg: &Config, upstream: &Arc<Upstream>) -> Router {
+pub fn router(cfg: &Config, upstream: &Arc<Upstream>, token: CancellationToken) -> Router {
     let peer = Arc::clone(upstream.peer());
     let info = Arc::new(upstream.info().clone());
     let service = StreamableHttpService::new(
         move || Ok(ProxyHandler::new(Arc::clone(&peer), Arc::clone(&info))),
         Arc::new(LocalSessionManager::default()),
-        server_config(cfg),
+        server_config(cfg, token),
     );
     router_with(cfg, service)
 }
@@ -139,31 +148,57 @@ async fn shutdown_signal() {
 /// Returns an error if the address cannot be bound, the TLS identity cannot
 /// be loaded, or the server fails.
 pub async fn serve(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+    // One token per serve call: the signal task cancels it, which ends rmcp
+    // SSE streams (via the server config) and trips every graceful shutdown
+    // below. Nothing awaits the token while holding it; it is only cloned.
+    let token = CancellationToken::new();
+    let signal = token.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        signal.cancel();
+    });
+
     if cfg.tls_enabled() {
-        serve_tls(cfg, upstream).await
+        serve_tls(cfg, upstream, token).await
     } else {
-        serve_plain(cfg, upstream).await
+        serve_plain(cfg, upstream, token).await
     }
 }
 
-async fn serve_plain(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+async fn serve_plain(
+    cfg: &Config,
+    upstream: &Arc<Upstream>,
+    token: CancellationToken,
+) -> Result<()> {
     let listener = bind(cfg).await?;
     let local = listener
         .local_addr()
         .context("listener has no local address")?;
     tracing::info!(%local, path = %cfg.mcp_path, "stdio2http listening");
 
-    axum::serve(listener, router(cfg, upstream))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("HTTP server failed")
+    let server = axum::serve(listener, router(cfg, upstream, token.clone()))
+        .with_graceful_shutdown(token.clone().cancelled_owned());
+    // Axum's graceful drain waits out idle keep-alive and SSE streams, so an
+    // open stream would pin the process indefinitely. Bound it: after the
+    // signal plus `SHUTDOWN_GRACE`, return and drop the server, which closes
+    // the remaining connections.
+    tokio::select! {
+        result = server => result.context("HTTP server failed"),
+        () = async {
+            token.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!("shutdown grace expired; dropping open connections");
+            Ok(())
+        }
+    }
 }
 
-async fn serve_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+async fn serve_tls(cfg: &Config, upstream: &Arc<Upstream>, token: CancellationToken) -> Result<()> {
     if cfg.has_manual_cert() {
-        serve_manual_tls(cfg, upstream).await
+        serve_manual_tls(cfg, upstream, token).await
     } else if cfg.uses_acme() {
-        serve_acme(cfg, upstream).await
+        serve_acme(cfg, upstream, token).await
     } else {
         // mTLS-alone: `Config::validate` rejects this; fail closed here too so
         // a caller that skipped validation still gets the same message.
@@ -173,7 +208,11 @@ async fn serve_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
     }
 }
 
-async fn serve_manual_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+async fn serve_manual_tls(
+    cfg: &Config,
+    upstream: &Arc<Upstream>,
+    token: CancellationToken,
+) -> Result<()> {
     let addr = cfg.socket_addr();
     let material = crate::tls::load(cfg).context("TLS setup failed")?;
     let info = &material.info;
@@ -191,14 +230,15 @@ async fn serve_manual_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> 
     let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(material.server_config));
     let handle = axum_server::Handle::new();
     let shutdown = handle.clone();
+    let signal = token.clone();
     tokio::spawn(async move {
-        shutdown_signal().await;
-        shutdown.graceful_shutdown(None);
+        signal.cancelled().await;
+        shutdown.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
     axum_server::tls_rustls::bind_rustls(addr, tls)
         .handle(handle)
-        .serve(router(cfg, upstream).into_make_service())
+        .serve(router(cfg, upstream, token).into_make_service())
         .await
         .context("HTTPS server failed")
 }
@@ -208,7 +248,11 @@ async fn serve_manual_tls(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> 
 /// Bind order matters: the HTTP-01 challenge listener goes up first and stays
 /// for the process lifetime (renewals need it), then `ensure_cert_with`
 /// issues into the same shared token map the listener serves.
-async fn serve_acme(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
+async fn serve_acme(
+    cfg: &Config,
+    upstream: &Arc<Upstream>,
+    token: CancellationToken,
+) -> Result<()> {
     use crate::acme::{AcmeConfig, AcmeManager, ChallengeTokens, serve_challenges};
 
     let acme_cfg = AcmeConfig::from_config(cfg).map_err(anyhow::Error::msg)?;
@@ -264,9 +308,10 @@ async fn serve_acme(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
     let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(material.server_config));
     let handle = axum_server::Handle::new();
     let shutdown = handle.clone();
+    let signal = token.clone();
     tokio::spawn(async move {
-        shutdown_signal().await;
-        shutdown.graceful_shutdown(None);
+        signal.cancelled().await;
+        shutdown.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
     // Renewals publish into the same shared map the challenge listener serves.
@@ -287,7 +332,7 @@ async fn serve_acme(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
 
     axum_server::tls_rustls::bind_rustls(addr, tls)
         .handle(handle)
-        .serve(router(cfg, upstream).into_make_service())
+        .serve(router(cfg, upstream, token).into_make_service())
         .await
         .context("HTTPS server failed")
 }
@@ -409,7 +454,7 @@ mod tests {
 
     #[test]
     fn default_config_keeps_loopback_only_host_validation() {
-        let server = server_config(&config(&["--command", "s"]));
+        let server = server_config(&config(&["--command", "s"]), CancellationToken::new());
         assert_eq!(server.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
     }
 
@@ -424,7 +469,7 @@ mod tests {
             "proxy.internal:8080",
         ]);
         assert_eq!(
-            server_config(&cfg).allowed_hosts,
+            server_config(&cfg, CancellationToken::new()).allowed_hosts,
             ["proxy.internal", "proxy.internal:8080"]
         );
     }
@@ -432,7 +477,10 @@ mod tests {
     #[test]
     fn disabling_allowed_hosts_empties_the_list() {
         let cfg = config(&["--command", "s", "--disable-allowed-hosts"]);
-        assert_eq!(server_config(&cfg).allowed_hosts, Vec::<String>::new());
+        assert_eq!(
+            server_config(&cfg, CancellationToken::new()).allowed_hosts,
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -444,9 +492,18 @@ mod tests {
             "https://app.example.com",
         ]);
         assert_eq!(
-            server_config(&cfg).allowed_origins,
+            server_config(&cfg, CancellationToken::new()).allowed_origins,
             ["https://app.example.com"]
         );
+    }
+
+    #[test]
+    fn server_config_carries_the_shutdown_token() {
+        let token = CancellationToken::new();
+        let server = server_config(&config(&["--command", "s"]), token.clone());
+        assert!(!server.cancellation_token.is_cancelled());
+        token.cancel();
+        assert!(server.cancellation_token.is_cancelled());
     }
 
     #[tokio::test]

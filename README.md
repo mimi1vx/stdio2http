@@ -79,7 +79,7 @@ Flags and environment variables, no config file. Every flag has a matching
 | `--cwd` | `STDIO2HTTP_CWD` | inherit | Working directory for the child |
 | `--host` | `STDIO2HTTP_HOST` | `127.0.0.1` | Bind address |
 | `--port` | `STDIO2HTTP_PORT` | `8080` | Bind port (`0` picks an ephemeral one) |
-| `--mcp-path` | `STDIO2HTTP_MCP_PATH` | `/mcp` | Where the transport is mounted |
+| `--mcp-path` | `STDIO2HTTP_MCP_PATH` | `/mcp` | Where the transport is mounted; `/healthz` is reserved and rejected |
 | `--allowed-host` | `STDIO2HTTP_ALLOWED_HOSTS` | loopback only | Accepted `Host` values; repeat, comma-separated |
 | `--allowed-origin` | `STDIO2HTTP_ALLOWED_ORIGINS` | unset | Accepted `Origin` values; repeat, comma-separated |
 | `--auth-mode` | `STDIO2HTTP_AUTH_MODE` | `none` | `none`, `bearer`, or `identity-forward` |
@@ -120,6 +120,15 @@ a locally running server. **A deployment reachable off-host must set
 `--allowed-host`** (repeatable) or requests are rejected. `--disable-allowed-hosts`
 removes the check entirely; use it only when a trusted proxy in front already
 validates the header.
+
+### CORS
+
+`--allowed-origin` is an exact-origin allowlist (repeatable): no wildcards,
+no credentials. Preflight `OPTIONS` for a configured origin is answered
+before auth (no key needed); every other request still requires the key
+(`401` without it). Allowed methods are `GET`, `POST`, `DELETE`; allowed
+headers are `authorization`, `content-type`, `x-api-key`, `mcp-session-id`,
+`mcp-protocol-version`, `last-event-id`.
 
 ## Authentication
 
@@ -343,12 +352,15 @@ handles these explicitly is a different design.
 ## Development
 
 ```sh
-cargo test          # unit + end-to-end
+cargo build --locked --manifest-path tests/fixtures/mock-mcp-server/Cargo.toml
+cargo test --locked   # unit + end-to-end
 cargo clippy --all-targets -- -D warnings
 ```
 
-The end-to-end tests build and spawn a deterministic fixture MCP server from
-`tests/fixtures/mock-mcp-server/`, so `cargo test` needs no network access.
+The end-to-end tests spawn a deterministic fixture MCP server from
+`tests/fixtures/mock-mcp-server/`, so pre-build the fixture first (the
+harness panics without the binary) and `cargo test` needs no network access.
+For ACME work, pass `--features acme` to the build and test commands.
 
 Dependencies update via weekly grouped Dependabot PRs (`cargo` +
 `github-actions`, see `.github/dependabot.yml`); merge bar is

@@ -391,8 +391,9 @@ handles these explicitly is a different design.
 ## Operational behavior
 
 - **A child that fails to start is fatal.** `stdio2http` exits non-zero; it does not restart the
-  child. If the child dies later, calls fail with an opaque `internal_error`
-  and the proxy still does not restart it. Let your orchestrator handle it.
+  child. If the child dies later, calls fail with an opaque `internal_error`,
+  `/healthz` answers `503`, and the proxy exits non-zero. It still does not
+  restart the child itself — let your orchestrator handle it.
 - **`SIGTERM`/`SIGINT` shut down gracefully**, within a few seconds, and reap
   the child. Container stop signals work as expected.
 - **Startup logs** the child pid, upstream name and version, negotiated protocol

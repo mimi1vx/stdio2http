@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::{MethodFilter, get};
+use http::StatusCode;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -61,7 +62,9 @@ fn server_config(cfg: &Config, token: CancellationToken) -> StreamableHttpServer
 /// Mount a Streamable HTTP service behind the auth layer, leaving `/healthz` open.
 ///
 /// Generic over the service so tests can substitute a stub for the real child.
-pub fn router_with<S>(cfg: &Config, mcp: S) -> Router
+/// `healthy` reports whether the upstream child is still reachable; an
+/// unhealthy proxy answers `/healthz` with 503 so orchestrators restart it.
+pub fn router_with<S, F>(cfg: &Config, mcp: S, healthy: F) -> Router
 where
     S: Service<http::Request<axum::body::Body>, Error = std::convert::Infallible>
         + Clone
@@ -70,6 +73,7 @@ where
         + 'static,
     S::Response: axum::response::IntoResponse + 'static,
     S::Future: Send + 'static,
+    F: Fn() -> bool + Clone + Send + Sync + 'static,
 {
     let guarded = axum::routing::MethodRouter::new()
         .on_service(ALL_METHODS, mcp)
@@ -78,21 +82,32 @@ where
             crate::auth::require,
         ));
 
-    Router::new()
-        .route(&cfg.mcp_path, guarded)
-        .route("/healthz", get(|| async { HEALTH_BODY }))
+    Router::new().route(&cfg.mcp_path, guarded).route(
+        "/healthz",
+        get(move || {
+            let healthy = healthy.clone();
+            async move {
+                if healthy() {
+                    (StatusCode::OK, HEALTH_BODY)
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable")
+                }
+            }
+        }),
+    )
 }
 
 /// Build the router backed by the shared upstream child.
 pub fn router(cfg: &Config, upstream: &Arc<Upstream>, token: CancellationToken) -> Router {
     let peer = Arc::clone(upstream.peer());
+    let peer_for_health = Arc::clone(upstream.peer());
     let info = Arc::new(upstream.info().clone());
     let service = StreamableHttpService::new(
         move || Ok(ProxyHandler::new(Arc::clone(&peer), Arc::clone(&info))),
         Arc::new(LocalSessionManager::default()),
         server_config(cfg, token),
     );
-    router_with(cfg, service)
+    router_with(cfg, service, move || !peer_for_health.is_transport_closed())
 }
 
 /// Bind the listener. Port `0` selects an ephemeral port.
@@ -137,6 +152,10 @@ async fn shutdown_signal() {
 
 /// Serve until a shutdown signal arrives, then return so the caller can reap the child.
 ///
+/// If the upstream child exits first, the shutdown token is cancelled so the
+/// listener drains, and this returns an error so the process exits non-zero
+/// and the orchestrator restarts it.
+///
 /// A configured certificate (or ACME selection) switches the listener to
 /// HTTPS-only TLS on the same `host:port`; plain HTTP on that port then fails
 /// at the handshake instead of serving. mTLS, when configured, is enforced by
@@ -146,7 +165,7 @@ async fn shutdown_signal() {
 /// # Errors
 ///
 /// Returns an error if the address cannot be bound, the TLS identity cannot
-/// be loaded, or the server fails.
+/// be loaded, the upstream child exits, or the server fails.
 pub async fn serve(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
     // One token per serve call: the signal task cancels it, which ends rmcp
     // SSE streams (via the server config) and trips every graceful shutdown
@@ -158,11 +177,39 @@ pub async fn serve(cfg: &Config, upstream: &Arc<Upstream>) -> Result<()> {
         signal.cancel();
     });
 
-    if cfg.tls_enabled() {
-        serve_tls(cfg, upstream, token).await
+    spawn_upstream_watcher(upstream, &token);
+
+    let result = if cfg.tls_enabled() {
+        serve_tls(cfg, upstream, token.clone()).await
     } else {
-        serve_plain(cfg, upstream, token).await
+        serve_plain(cfg, upstream, token.clone()).await
+    };
+
+    if upstream.peer().is_transport_closed() {
+        return Err(anyhow::anyhow!("upstream MCP server exited"));
     }
+    result
+}
+
+/// Cancel the shutdown token once the child is gone so an idle proxy does not
+/// keep serving a dead upstream. The `serve` result is mapped to an error
+/// separately so the process exits non-zero.
+fn spawn_upstream_watcher(upstream: &Arc<Upstream>, token: &CancellationToken) {
+    let peer = Arc::clone(upstream.peer());
+    let token = token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = token.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            if peer.is_transport_closed() {
+                tracing::error!("upstream MCP server exited; shutting down");
+                token.cancel();
+                break;
+            }
+        }
+    });
 }
 
 async fn serve_plain(
@@ -510,17 +557,27 @@ mod tests {
     async fn health_endpoint_is_not_behind_auth() {
         let cfg = config(&["--command", "s", "--auth-mode", "bearer", "--api-key", "k"]);
 
-        let (status, body) = call(router_with(&cfg, stub_service()), "/healthz").await;
+        let (status, body) = call(router_with(&cfg, stub_service(), || true), "/healthz").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, HEALTH_BODY.as_bytes());
     }
 
     #[tokio::test]
+    async fn unhealthy_reports_service_unavailable() {
+        let cfg = config(&["--command", "s"]);
+
+        let (status, body) = call(router_with(&cfg, stub_service(), || false), "/healthz").await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, b"upstream unavailable");
+    }
+
+    #[tokio::test]
     async fn mcp_route_is_mounted_at_the_configured_path() {
         let cfg = config(&["--command", "s", "--mcp-path", "/rpc"]);
 
-        let (status, body) = call(router_with(&cfg, stub_service()), "/rpc").await;
+        let (status, body) = call(router_with(&cfg, stub_service(), || true), "/rpc").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"mcp-ok");
@@ -530,7 +587,7 @@ mod tests {
     async fn unknown_paths_are_not_routed_to_the_child() {
         let cfg = config(&["--command", "s"]);
 
-        let (status, _) = call(router_with(&cfg, stub_service()), "/nope").await;
+        let (status, _) = call(router_with(&cfg, stub_service(), || true), "/nope").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }

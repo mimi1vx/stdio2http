@@ -460,6 +460,15 @@ async fn an_upstream_failure_does_not_leak_child_stderr() {
             );
         }
     }
+
+    let health = reqwest::get(format!("http://{}/healthz", harness.addr))
+        .await
+        .expect("healthz answers after upstream death");
+    assert_eq!(health.status(), 503, "a dead child must surface as 503");
+    assert_eq!(
+        health.text().await.expect("body reads"),
+        "upstream unavailable"
+    );
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ exclude = [".beads/"]
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"
 instant-acme = {

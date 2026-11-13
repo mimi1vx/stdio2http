@@ -15,7 +15,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 rmcp = {
-  version = "=3.5.1",
+  version = "3.10",
   default-features = false,
   features = [
     "macros",

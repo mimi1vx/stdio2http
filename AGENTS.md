@@ -27,7 +27,7 @@ curl -fsS localhost:8080/healthz       # smoke test (-> ok)
 
 ## Gotchas
 
-- `rmcp = "=3.5.1"` pinned in both crates. Server needs `transport-streamable-http-server` + `transport-streamable-http-server-session`; do not enable the non-default `local` feature. After touching features, verify with `cargo tree -e features | grep streamable`.
+- `rmcp = "3.10"` (minimum, not exact) in both crates; keep the two requirements in step. Server needs `transport-streamable-http-server` + `transport-streamable-http-server-session`; do not enable the non-default `local` feature. After touching features, verify with `cargo tree -e features | grep streamable`.
 - `allowed_hosts` defaults to loopback only (DNS-rebinding guard). Off-host deployments must pass `--allowed-host`; `--disable-allowed-hosts` only behind a validating proxy.
 - `--api-key KEY` (bare) forwards the secret itself as `_meta["io.stdio2http/caller"]`; prefer `KEY=SUBJECT`. `identity-forward` is advisory `_meta`, not process isolation; shared upstream state is shared across all callers.
 - TLS is opt-in per listener (`src/tls.rs`, `src/acme.rs`): no TLS flags → plain HTTP; any cert/ACME/client-CA input → same `host:port` speaks HTTPS only, no redirect. ACME needs `cargo build --features acme`. mTLS verifies at the handshake so `/healthz` needs a client cert too.

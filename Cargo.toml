@@ -6,7 +6,6 @@ rust-version = "1.99"
 description = "MCP stdio -> Streamable HTTP proxy"
 documentation = "https://docs.rs/stdio2http"
 readme = "README.md"
-homepage = "https://github.com/mimi1vx/stdio2http"
 repository = "https://github.com/mimi1vx/stdio2http"
 license = "MIT OR Apache-2.0"
 keywords = ["http", "mcp", "proxy"]

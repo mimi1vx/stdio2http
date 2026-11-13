@@ -30,7 +30,7 @@ instant-acme = {
   optional = true
 }
 rmcp = {
-  version = "=3.5.1",
+  version = "3.10",
   default-features = false,
   features = [
     "client",
@@ -61,7 +61,7 @@ time = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 # Test-only: the HTTP client transport drives the proxy the way a real MCP client would.
 rmcp = {
-  version = "=3.5.1",
+  version = "3.10",
   default-features = false,
   features = [
     "client",

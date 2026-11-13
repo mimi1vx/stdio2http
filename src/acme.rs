@@ -66,17 +66,17 @@ use axum::response::IntoResponse as _;
 use serde::{Deserialize, Serialize};
 
 /// Renew when the installed cert has less than this much lifetime left.
-pub const RENEW_BEFORE: Duration = Duration::from_secs(30 * 24 * 3600);
+pub const RENEW_BEFORE: Duration = Duration::from_hours(30 * 24);
 
 /// Upper bound added on top of the renewal sleep to avoid thundering herds.
-pub const RENEW_JITTER_MAX: Duration = Duration::from_secs(6 * 3600);
+pub const RENEW_JITTER_MAX: Duration = Duration::from_hours(6);
 
 /// Assumed certificate lifetime when the CA does not tell us otherwise.
 ///
 /// Let's Encrypt (prod and staging) issues 90-day certificates; the renewal
 /// loop only needs an expiry that is close enough to schedule the next
 /// issuance at <30d remaining. Stored in the cache alongside the chain.
-pub const ASSUMED_CERT_LIFETIME: Duration = Duration::from_secs(90 * 24 * 3600);
+pub const ASSUMED_CERT_LIFETIME: Duration = Duration::from_hours(90 * 24);
 
 /// File inside `--acme-cache-dir` holding account credentials + cert chain.
 pub const CACHE_FILE_NAME: &str = "acme-cache.json";

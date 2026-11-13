@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/mimi1vx/stdio2http/compare/v0.3.0...v0.3.1) - 2026-11-13
+
+### Other
+
+- drop homepage that duplicates repository
+- raise MSRV to 1.99
+- *(deps)* require rmcp 3.10 instead of an exact pin
+- *(deps)* refresh lockfiles to latest compatible versions
+- bump axum-server from 0.8.0 to 0.9.0 in the cargo-deps group
+- bump tokio from 1.53.3 to 1.54.1 in the cargo-deps group
+- bump rust-lang/crates-io-auth-action
+
 ## [0.3.0](https://github.com/mimi1vx/stdio2http/compare/v0.2.1...v0.3.0) - 2026-10-22
 
 ### Added

@@ -13,6 +13,10 @@ it with [`rmcp`](https://crates.io/crates/rmcp). Session ids, `Mcp-Session-Id`,
 SSE framing, `Last-Event-ID`, content negotiation, and protocol negotiation are
 all handled by rmcp — none of that is reimplemented here.
 
+![A stdio MCP server, re-exposed over HTTP: stdio2http starts the filesystem
+server, /healthz answers ok, and an HTTP MCP client calls a tool through
+it](docs/demo.gif)
+
 ```text
                     ┌──────────────────────────────┐
  HTTP client  ──────▶│ /mcp  StreamableHttpService  │

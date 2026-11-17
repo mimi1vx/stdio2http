@@ -36,6 +36,12 @@ it](docs/demo.gif)
 One child serves every HTTP session: the service factory clones the `Arc<Peer>`,
 so all sessions multiplex over the same process by JSON-RPC request id.
 
+Sessions live in memory only. After a proxy restart, or 300s of inactivity, a
+request carrying an old `Mcp-Session-Id` gets `404 Not Found: Session not
+found`; the client must send `initialize` again (without the header) to get a new
+id. rmcp clients do this automatically; hand-rolled clients such as `curl` must
+do it themselves.
+
 ## Installation
 
 ```sh

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/mimi1vx/stdio2http/compare/v0.3.1...v0.3.2) - 2026-11-24
+
+### Other
+
+- *(deps)* bump url to 2.5.9 for RUSTSEC-2026-0592
+- bump the cargo-deps group with 2 updates
+- *(readme)* explain stale session ids after restart or idle expiry
+- *(readme)* add terminal demo recording
+- sharpen crate description and keywords for discovery
+
 ## [0.3.1](https://github.com/mimi1vx/stdio2http/compare/v0.3.0...v0.3.1) - 2026-11-13
 
 ### Other
